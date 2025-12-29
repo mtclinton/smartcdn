@@ -1,3 +1,57 @@
+/**
+ * Determines cache TTL in seconds based on file extension or path
+ * @param {string} pathname - The request pathname
+ * @returns {number} Cache TTL in seconds
+ */
+function getCacheTTL(pathname) {
+  const lowerPath = pathname.toLowerCase();
+  
+  // API responses: 5 minutes
+  if (lowerPath.startsWith('/api/')) {
+    return 5 * 60; // 5 minutes
+  }
+  
+  // Get file extension
+  const lastDot = lowerPath.lastIndexOf('.');
+  if (lastDot === -1) {
+    // No extension, check if it's HTML-like
+    if (lowerPath.endsWith('/') || lowerPath === '' || !lowerPath.includes('.')) {
+      return 60 * 60; // 1 hour (treat as HTML)
+    }
+    return 24 * 60 * 60; // Default: 1 day
+  }
+  
+  const extension = lowerPath.substring(lastDot + 1);
+  
+  // Images: 30 days
+  const imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg', 'ico'];
+  if (imageExtensions.includes(extension)) {
+    return 30 * 24 * 60 * 60; // 30 days
+  }
+  
+  // CSS/JS: 7 days
+  if (extension === 'css' || extension === 'js') {
+    return 7 * 24 * 60 * 60; // 7 days
+  }
+  
+  // HTML: 1 hour
+  if (extension === 'html' || extension === 'htm') {
+    return 60 * 60; // 1 hour
+  }
+  
+  // Default: 1 day
+  return 24 * 60 * 60; // 1 day
+}
+
+/**
+ * Formats TTL in seconds to Cache-Control max-age directive
+ * @param {number} ttlSeconds - TTL in seconds
+ * @returns {string} Cache-Control header value
+ */
+function getCacheControlHeader(ttlSeconds) {
+  return `public, max-age=${ttlSeconds}`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -15,13 +69,39 @@ export default {
       // Handle different request methods
       switch (method) {
         case 'GET':
-          return new Response("Hello from SmartCDN - GET request", {
+          // Check cache first
+          const cache = caches.default;
+          const cacheKey = new Request(url.href, request);
+          const cachedResponse = await cache.match(cacheKey);
+          
+          if (cachedResponse) {
+            console.log('Cache HIT for:', url.pathname);
+            return cachedResponse;
+          }
+          
+          console.log('Cache MISS for:', url.pathname);
+          
+          // Determine cache TTL based on content type
+          const ttlSeconds = getCacheTTL(url.pathname);
+          const cacheControl = getCacheControlHeader(ttlSeconds);
+          
+          console.log(`Cache TTL: ${ttlSeconds} seconds (${Math.round(ttlSeconds / 60)} minutes)`);
+          
+          // Create response with cache headers
+          const response = new Response("Hello from SmartCDN - GET request", {
             status: 200,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": cacheControl,
             },
           });
+          
+          // Cache the response
+          // Use waitUntil to cache in the background without blocking the response
+          ctx.waitUntil(cache.put(cacheKey, response.clone()));
+          
+          return response;
 
         case 'POST':
           // Try to read request body if present
@@ -82,13 +162,39 @@ export default {
           });
 
         case 'HEAD':
-          return new Response(null, {
+          // Check cache first for HEAD requests too
+          const headCache = caches.default;
+          const headCacheKey = new Request(url.href, request);
+          const cachedHeadResponse = await headCache.match(headCacheKey);
+          
+          if (cachedHeadResponse) {
+            console.log('Cache HIT (HEAD) for:', url.pathname);
+            // Return HEAD response with same headers but no body
+            return new Response(null, {
+              status: cachedHeadResponse.status,
+              headers: cachedHeadResponse.headers,
+            });
+          }
+          
+          console.log('Cache MISS (HEAD) for:', url.pathname);
+          
+          // Determine cache TTL
+          const headTtlSeconds = getCacheTTL(url.pathname);
+          const headCacheControl = getCacheControlHeader(headTtlSeconds);
+          
+          const headResponse = new Response(null, {
             status: 200,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": headCacheControl,
             },
           });
+          
+          // Cache the response
+          ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
+          
+          return headResponse;
 
         default:
           return new Response(`Method ${method} not allowed`, {
