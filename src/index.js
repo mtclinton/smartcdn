@@ -46,10 +46,198 @@ function getCacheTTL(pathname) {
 /**
  * Formats TTL in seconds to Cache-Control max-age directive
  * @param {number} ttlSeconds - TTL in seconds
+ * @param {boolean} immutable - Whether the content is immutable
  * @returns {string} Cache-Control header value
  */
-function getCacheControlHeader(ttlSeconds) {
-  return `public, max-age=${ttlSeconds}`;
+function getCacheControlHeader(ttlSeconds, immutable = false) {
+  const directives = ['public', `max-age=${ttlSeconds}`];
+  if (immutable) {
+    directives.push('immutable');
+  }
+  return directives.join(', ');
+}
+
+/**
+ * Determines Content-Type based on file extension
+ * @param {string} pathname - The request pathname
+ * @returns {string} Content-Type header value
+ */
+function getContentType(pathname) {
+  const lowerPath = pathname.toLowerCase();
+  const lastDot = lowerPath.lastIndexOf('.');
+  if (lastDot === -1) {
+    return 'text/html; charset=utf-8';
+  }
+  
+  const extension = lowerPath.substring(lastDot + 1);
+  const contentTypes = {
+    // Images
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'svg': 'image/svg+xml',
+    'ico': 'image/x-icon',
+    'avif': 'image/avif',
+    'bmp': 'image/bmp',
+    // Text
+    'html': 'text/html; charset=utf-8',
+    'htm': 'text/html; charset=utf-8',
+    'css': 'text/css; charset=utf-8',
+    'js': 'application/javascript; charset=utf-8',
+    'json': 'application/json; charset=utf-8',
+    'xml': 'application/xml; charset=utf-8',
+    'txt': 'text/plain; charset=utf-8',
+    // Fonts
+    'woff': 'font/woff',
+    'woff2': 'font/woff2',
+    'ttf': 'font/ttf',
+    'otf': 'font/otf',
+    // Other
+    'pdf': 'application/pdf',
+    'zip': 'application/zip',
+  };
+  
+  return contentTypes[extension] || 'application/octet-stream';
+}
+
+/**
+ * Generates an ETag from content
+ * @param {string|ArrayBuffer} content - The response content
+ * @param {string} url - The request URL (for consistency)
+ * @returns {string} ETag value
+ */
+function generateETag(content, url) {
+  // Create a hash from content and URL for consistent ETags
+  const data = typeof content === 'string' ? content : url;
+  // Simple hash function (in production, you might want to use crypto.subtle)
+  let hash = 0;
+  for (let i = 0; i < data.length; i++) {
+    const char = data.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return `"${Math.abs(hash).toString(16)}"`;
+}
+
+/**
+ * Gets Last-Modified header value (current time for now, could be from origin)
+ * @param {Response|null} originResponse - Optional origin response to extract from
+ * @returns {string} Last-Modified header value
+ */
+function getLastModified(originResponse = null) {
+  if (originResponse && originResponse.headers.get('Last-Modified')) {
+    return originResponse.headers.get('Last-Modified');
+  }
+  // Use current time as default
+  return new Date().toUTCString();
+}
+
+/**
+ * Merges origin cache headers with edge caching rules
+ * @param {Response|null} originResponse - The origin response (if any)
+ * @param {string} pathname - The request pathname
+ * @param {Headers} responseHeaders - The response headers to populate
+ */
+function applyCacheHeaders(originResponse, pathname, responseHeaders) {
+  // Determine our edge cache TTL
+  const edgeTtl = getCacheTTL(pathname);
+  
+  // Check if content is immutable (images, fonts, etc.)
+  const isImmutable = isImagePath(pathname) || 
+                      pathname.toLowerCase().match(/\.(woff2?|ttf|otf|eot)$/);
+  
+  // If we have an origin response, check its cache headers
+  if (originResponse) {
+    const originCacheControl = originResponse.headers.get('Cache-Control');
+    const originETag = originResponse.headers.get('ETag');
+    const originLastModified = originResponse.headers.get('Last-Modified');
+    
+    // Use origin ETag if available
+    if (originETag) {
+      responseHeaders.set('ETag', originETag);
+    }
+    
+    // Use origin Last-Modified if available
+    if (originLastModified) {
+      responseHeaders.set('Last-Modified', originLastModified);
+    }
+    
+    // Parse origin Cache-Control
+    if (originCacheControl) {
+      // Check if origin says no-cache or no-store
+      if (originCacheControl.includes('no-cache') || originCacheControl.includes('no-store')) {
+        // Respect origin's no-cache directive but still apply our edge caching
+        responseHeaders.set('Cache-Control', getCacheControlHeader(Math.min(edgeTtl, 60), isImmutable));
+        responseHeaders.set('Vary', 'Origin');
+        return;
+      }
+      
+      // Extract max-age from origin if present
+      const maxAgeMatch = originCacheControl.match(/max-age=(\d+)/);
+      if (maxAgeMatch) {
+        const originMaxAge = parseInt(maxAgeMatch[1], 10);
+        // Use the minimum of origin and edge TTL
+        const finalTtl = Math.min(edgeTtl, originMaxAge);
+        responseHeaders.set('Cache-Control', getCacheControlHeader(finalTtl, isImmutable));
+        return;
+      }
+    }
+  }
+  
+  // Apply our edge caching rules (no origin response or no cache headers)
+  responseHeaders.set('Cache-Control', getCacheControlHeader(edgeTtl, isImmutable));
+  
+  // Generate ETag if not from origin
+  if (!originResponse || !originResponse.headers.get('ETag')) {
+    const etag = generateETag(pathname, pathname);
+    responseHeaders.set('ETag', etag);
+  }
+  
+  // Set Last-Modified if not from origin
+  if (!originResponse || !originResponse.headers.get('Last-Modified')) {
+    responseHeaders.set('Last-Modified', getLastModified(originResponse));
+  }
+}
+
+/**
+ * Checks if a request is a conditional request and validates it
+ * @param {Request} request - The incoming request
+ * @param {Response} response - The response to check against
+ * @returns {Response|null} 304 Not Modified response if valid, null otherwise
+ */
+function handleConditionalRequest(request, response) {
+  const ifNoneMatch = request.headers.get('If-None-Match');
+  const ifModifiedSince = request.headers.get('If-Modified-Since');
+  const etag = response.headers.get('ETag');
+  const lastModified = response.headers.get('Last-Modified');
+  
+  // Check ETag (strong validator, takes precedence)
+  if (ifNoneMatch && etag) {
+    // ETag comparison (handle multiple ETags in If-None-Match)
+    const etags = ifNoneMatch.split(',').map(e => e.trim());
+    if (etags.includes(etag) || etags.includes('*')) {
+      return new Response(null, {
+        status: 304,
+        headers: response.headers,
+      });
+    }
+  }
+  
+  // Check Last-Modified (weak validator)
+  if (ifModifiedSince && lastModified && !ifNoneMatch) {
+    const ifModifiedSinceDate = new Date(ifModifiedSince);
+    const lastModifiedDate = new Date(lastModified);
+    if (lastModifiedDate <= ifModifiedSinceDate) {
+      return new Response(null, {
+        status: 304,
+        headers: response.headers,
+      });
+    }
+  }
+  
+  return null;
 }
 
 /**
@@ -165,26 +353,53 @@ export default {
           
           if (cachedResponse) {
             console.log('Cache HIT for:', url.pathname);
+            
+            // Check for conditional request (If-None-Match, If-Modified-Since)
+            const conditionalResponse = handleConditionalRequest(request, cachedResponse);
+            if (conditionalResponse) {
+              console.log('Conditional request validated - returning 304 Not Modified');
+              return conditionalResponse;
+            }
+            
             return cachedResponse;
           }
           
           console.log('Cache MISS for:', url.pathname);
           
-          // Determine cache TTL based on content type
+          // In a real scenario, you would fetch from origin here
+          // For now, we'll create a response as if it came from origin
+          const originResponse = null; // Replace with: await fetch(originUrl, request);
+          
+          // Determine content type
+          const contentType = getContentType(url.pathname);
+          
+          // Create response headers
+          const responseHeaders = new Headers({
+            'Content-Type': contentType,
+            'X-Request-Method': method,
+          });
+          
+          // Apply cache headers (respects origin headers if available)
+          applyCacheHeaders(originResponse, url.pathname, responseHeaders);
+          
           const ttlSeconds = getCacheTTL(url.pathname);
-          const cacheControl = getCacheControlHeader(ttlSeconds);
-          
           console.log(`Cache TTL: ${ttlSeconds} seconds (${Math.round(ttlSeconds / 60)} minutes)`);
+          console.log('Cache-Control:', responseHeaders.get('Cache-Control'));
+          console.log('ETag:', responseHeaders.get('ETag'));
+          console.log('Last-Modified:', responseHeaders.get('Last-Modified'));
           
-          // Create response with cache headers
+          // Create response with all cache headers
           const response = new Response("Hello from SmartCDN - GET request", {
             status: 200,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "Cache-Control": cacheControl,
-            },
+            headers: responseHeaders,
           });
+          
+          // Check for conditional request before caching
+          const conditionalCheck = handleConditionalRequest(request, response);
+          if (conditionalCheck) {
+            console.log('Conditional request validated - returning 304 Not Modified');
+            return conditionalCheck;
+          }
           
           // Cache the response using the normalized cache key
           // Use waitUntil to cache in the background without blocking the response
@@ -209,6 +424,9 @@ export default {
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+              "Pragma": "no-cache",
+              "Expires": "0",
             },
           });
 
@@ -218,6 +436,9 @@ export default {
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+              "Pragma": "no-cache",
+              "Expires": "0",
             },
           });
 
@@ -227,6 +448,9 @@ export default {
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+              "Pragma": "no-cache",
+              "Expires": "0",
             },
           });
 
@@ -236,6 +460,9 @@ export default {
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+              "Pragma": "no-cache",
+              "Expires": "0",
             },
           });
 
@@ -266,6 +493,14 @@ export default {
           
           if (cachedHeadResponse) {
             console.log('Cache HIT (HEAD) for:', url.pathname);
+            
+            // Check for conditional request
+            const headConditionalResponse = handleConditionalRequest(request, cachedHeadResponse);
+            if (headConditionalResponse) {
+              console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
+              return headConditionalResponse;
+            }
+            
             // Return HEAD response with same headers but no body
             return new Response(null, {
               status: cachedHeadResponse.status,
@@ -275,18 +510,35 @@ export default {
           
           console.log('Cache MISS (HEAD) for:', url.pathname);
           
-          // Determine cache TTL
+          // In a real scenario, you would fetch from origin here
+          const headOriginResponse = null; // Replace with: await fetch(originUrl, request);
+          
+          // Determine content type
+          const headContentType = getContentType(url.pathname);
+          
+          // Create response headers
+          const headResponseHeaders = new Headers({
+            'Content-Type': headContentType,
+            'X-Request-Method': method,
+          });
+          
+          // Apply cache headers
+          applyCacheHeaders(headOriginResponse, url.pathname, headResponseHeaders);
+          
           const headTtlSeconds = getCacheTTL(url.pathname);
-          const headCacheControl = getCacheControlHeader(headTtlSeconds);
+          console.log(`Cache TTL (HEAD): ${headTtlSeconds} seconds (${Math.round(headTtlSeconds / 60)} minutes)`);
           
           const headResponse = new Response(null, {
             status: 200,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "Cache-Control": headCacheControl,
-            },
+            headers: headResponseHeaders,
           });
+          
+          // Check for conditional request
+          const headConditionalCheck = handleConditionalRequest(request, headResponse);
+          if (headConditionalCheck) {
+            console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
+            return headConditionalCheck;
+          }
           
           // Cache the response using the normalized cache key
           ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
