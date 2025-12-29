@@ -52,6 +52,87 @@ function getCacheControlHeader(ttlSeconds) {
   return `public, max-age=${ttlSeconds}`;
 }
 
+/**
+ * Checks if a pathname represents an image file
+ * @param {string} pathname - The request pathname
+ * @returns {boolean} True if the path is an image
+ */
+function isImagePath(pathname) {
+  const lowerPath = pathname.toLowerCase();
+  const imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg', 'ico', 'avif', 'bmp'];
+  const lastDot = lowerPath.lastIndexOf('.');
+  if (lastDot === -1) return false;
+  const extension = lowerPath.substring(lastDot + 1);
+  return imageExtensions.includes(extension);
+}
+
+/**
+ * Generates a custom cache key URL by filtering query parameters
+ * For images: includes relevant params (width, height, quality, format) but excludes tracking params
+ * For non-images: excludes tracking params but keeps other params
+ * @param {URL} url - The request URL
+ * @returns {Request} A new Request object with the normalized cache key URL
+ */
+function generateCacheKey(request, url) {
+  // Tracking parameters to exclude
+  const trackingParams = [
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'fbclid', 'gclid', 'ref', 'source', 'campaign', 'medium',
+    '_ga', '_gid', 'mc_cid', 'mc_eid', 'igshid', 'twclid',
+    'yclid', 'tt_medium', 'tt_content', 'affiliate_id', 'affid'
+  ];
+  
+  // Image-specific parameters to include (if it's an image)
+  const imageParams = [
+    'width', 'w', 'height', 'h', 'quality', 'q', 'format', 'f',
+    'fit', 'crop', 'gravity', 'resize', 'scale', 'dpr', 'auto'
+  ];
+  
+  const isImage = isImagePath(url.pathname);
+  const filteredParams = new URLSearchParams();
+  
+  // Process all query parameters
+  for (const [key, value] of url.searchParams.entries()) {
+    const lowerKey = key.toLowerCase();
+    
+    // Always exclude tracking parameters
+    if (trackingParams.some(tp => lowerKey === tp || lowerKey.startsWith(tp + '_'))) {
+      continue;
+    }
+    
+    // For images, include image-specific params and all other non-tracking params
+    // For non-images, include all non-tracking params
+    if (isImage) {
+      // Include image params or any other non-tracking param
+      if (imageParams.includes(lowerKey) || !trackingParams.some(tp => lowerKey.startsWith(tp))) {
+        filteredParams.append(key, value);
+      }
+    } else {
+      // For non-images, include all non-tracking params
+      filteredParams.append(key, value);
+    }
+  }
+  
+  // Build the normalized cache key URL
+  const cacheKeyUrl = new URL(url);
+  cacheKeyUrl.search = filteredParams.toString();
+  
+  // Sort query params for consistent cache keys (optional but good practice)
+  if (cacheKeyUrl.search) {
+    const sortedParams = new URLSearchParams();
+    const entries = Array.from(filteredParams.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    entries.forEach(([key, value]) => sortedParams.append(key, value));
+    cacheKeyUrl.search = sortedParams.toString();
+  }
+  
+  // Create a new Request with the normalized URL for cache key
+  // Preserve the original request method and headers
+  return new Request(cacheKeyUrl.toString(), {
+    method: request.method,
+    headers: request.headers,
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -69,9 +150,17 @@ export default {
       // Handle different request methods
       switch (method) {
         case 'GET':
-          // Check cache first
+          // Generate custom cache key (normalizes query params)
           const cache = caches.default;
-          const cacheKey = new Request(url.href, request);
+          const cacheKey = generateCacheKey(request, url);
+          
+          // Log cache key info
+          const originalQuery = url.search;
+          const cacheKeyQuery = new URL(cacheKey.url).search;
+          if (originalQuery !== cacheKeyQuery) {
+            console.log('Cache key normalized - Original:', originalQuery, 'Normalized:', cacheKeyQuery);
+          }
+          
           const cachedResponse = await cache.match(cacheKey);
           
           if (cachedResponse) {
@@ -97,7 +186,7 @@ export default {
             },
           });
           
-          // Cache the response
+          // Cache the response using the normalized cache key
           // Use waitUntil to cache in the background without blocking the response
           ctx.waitUntil(cache.put(cacheKey, response.clone()));
           
@@ -162,9 +251,17 @@ export default {
           });
 
         case 'HEAD':
-          // Check cache first for HEAD requests too
+          // Generate custom cache key for HEAD requests too
           const headCache = caches.default;
-          const headCacheKey = new Request(url.href, request);
+          const headCacheKey = generateCacheKey(request, url);
+          
+          // Log cache key info
+          const headOriginalQuery = url.search;
+          const headCacheKeyQuery = new URL(headCacheKey.url).search;
+          if (headOriginalQuery !== headCacheKeyQuery) {
+            console.log('Cache key normalized (HEAD) - Original:', headOriginalQuery, 'Normalized:', headCacheKeyQuery);
+          }
+          
           const cachedHeadResponse = await headCache.match(headCacheKey);
           
           if (cachedHeadResponse) {
@@ -191,7 +288,7 @@ export default {
             },
           });
           
-          // Cache the response
+          // Cache the response using the normalized cache key
           ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
           
           return headResponse;
