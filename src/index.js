@@ -241,6 +241,125 @@ function handleConditionalRequest(request, response) {
 }
 
 /**
+ * Gets the client IP address from the request
+ * @param {Request} request - The incoming request
+ * @returns {string} The client IP address
+ */
+function getClientIP(request) {
+  // Check CF-Connecting-IP header (Cloudflare provides this)
+  const cfIP = request.headers.get('CF-Connecting-IP');
+  if (cfIP) {
+    return cfIP;
+  }
+  
+  // Fallback to X-Forwarded-For header
+  const xForwardedFor = request.headers.get('X-Forwarded-For');
+  if (xForwardedFor) {
+    // X-Forwarded-For can contain multiple IPs, take the first one
+    return xForwardedFor.split(',')[0].trim();
+  }
+  
+  // Fallback to X-Real-IP
+  const xRealIP = request.headers.get('X-Real-IP');
+  if (xRealIP) {
+    return xRealIP;
+  }
+  
+  // Last resort: return a default value
+  return 'unknown';
+}
+
+/**
+ * Hashes a string to a number for consistent variant assignment
+ * @param {string} input - The string to hash
+ * @returns {number} A hash value between 0 and 100
+ */
+function hashToVariant(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  // Return a value between 0 and 100
+  return Math.abs(hash) % 100;
+}
+
+/**
+ * Determines A/B test variant (A or B) based on a hash value
+ * @param {number} hashValue - Hash value between 0 and 100
+ * @param {number} splitPercent - Percentage for variant A (default 50)
+ * @returns {string} 'A' or 'B'
+ */
+function getVariantFromHash(hashValue, splitPercent = 50) {
+  return hashValue < splitPercent ? 'A' : 'B';
+}
+
+/**
+ * Gets or assigns an A/B test variant for a user
+ * Checks cookie first, then falls back to IP-based assignment
+ * @param {Request} request - The incoming request
+ * @returns {Object} Object with variant ('A' or 'B') and isNewAssignment (boolean)
+ */
+function getOrAssignVariant(request) {
+  const cookieName = 'smartcdn_variant';
+  
+  // Check for existing cookie
+  const cookieHeader = request.headers.get('Cookie');
+  if (cookieHeader) {
+    const cookies = cookieHeader.split(';').reduce((acc, cookie) => {
+      const [key, value] = cookie.trim().split('=');
+      if (key && value) {
+        acc[key.trim()] = decodeURIComponent(value);
+      }
+      return acc;
+    }, {});
+    
+    if (cookies[cookieName] && (cookies[cookieName] === 'A' || cookies[cookieName] === 'B')) {
+      console.log(`A/B Test: Existing variant found in cookie - ${cookies[cookieName]}`);
+      return {
+        variant: cookies[cookieName],
+        isNewAssignment: false,
+      };
+    }
+  }
+  
+  // No valid cookie found, assign based on IP address
+  const clientIP = getClientIP(request);
+  const hashValue = hashToVariant(clientIP);
+  const variant = getVariantFromHash(hashValue);
+  
+  console.log(`A/B Test: New assignment - IP: ${clientIP}, Hash: ${hashValue}, Variant: ${variant}`);
+  
+  return {
+    variant,
+    isNewAssignment: true,
+  };
+}
+
+/**
+ * Sets the smartcdn_variant cookie in the response
+ * @param {Response} response - The response to modify
+ * @param {string} variant - The variant ('A' or 'B')
+ * @returns {Response} The response with the cookie set
+ */
+function setVariantCookie(response, variant) {
+  const cookieName = 'smartcdn_variant';
+  const cookieValue = variant;
+  const maxAge = 30 * 24 * 60 * 60; // 30 days in seconds
+  const expires = new Date(Date.now() + maxAge * 1000).toUTCString();
+  
+  // Set cookie with SameSite=Lax for better compatibility
+  const cookieString = `${cookieName}=${cookieValue}; Path=/; Max-Age=${maxAge}; Expires=${expires}; SameSite=Lax; Secure`;
+  
+  // Clone response and add cookie header
+  const newResponse = response.clone();
+  newResponse.headers.append('Set-Cookie', cookieString);
+  
+  return newResponse;
+}
+
+/**
  * Checks if a pathname represents an image file
  * @param {string} pathname - The request pathname
  * @returns {boolean} True if the path is an image
@@ -329,10 +448,16 @@ export default {
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
 
+      // Get or assign A/B test variant
+      const variantInfo = getOrAssignVariant(request);
+      const variant = variantInfo.variant;
+      const isNewAssignment = variantInfo.isNewAssignment;
+
       // Log basic request information
       console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
       console.log('Request URL:', url.href);
       console.log('Request Method:', method);
+      console.log('A/B Test Variant:', variant, isNewAssignment ? '(new assignment)' : '(from cookie)');
       console.log('Request Headers:', JSON.stringify(headers, null, 2));
 
       // Handle different request methods
@@ -354,14 +479,32 @@ export default {
           if (cachedResponse) {
             console.log('Cache HIT for:', url.pathname);
             
+            // Add variant header to cached response
+            const cachedResponseWithVariant = new Response(cachedResponse.body, {
+              status: cachedResponse.status,
+              statusText: cachedResponse.statusText,
+              headers: cachedResponse.headers,
+            });
+            cachedResponseWithVariant.headers.set('X-AB-Test-Variant', variant);
+            
+            // Set cookie if this is a new assignment (cookie might have been cleared)
+            let finalCachedResponse = cachedResponseWithVariant;
+            if (isNewAssignment) {
+              finalCachedResponse = setVariantCookie(cachedResponseWithVariant, variant);
+            }
+            
             // Check for conditional request (If-None-Match, If-Modified-Since)
-            const conditionalResponse = handleConditionalRequest(request, cachedResponse);
+            const conditionalResponse = handleConditionalRequest(request, finalCachedResponse);
             if (conditionalResponse) {
               console.log('Conditional request validated - returning 304 Not Modified');
+              // Still set cookie on 304 responses if needed
+              if (isNewAssignment) {
+                return setVariantCookie(conditionalResponse, variant);
+              }
               return conditionalResponse;
             }
             
-            return cachedResponse;
+            return finalCachedResponse;
           }
           
           console.log('Cache MISS for:', url.pathname);
@@ -377,6 +520,7 @@ export default {
           const responseHeaders = new Headers({
             'Content-Type': contentType,
             'X-Request-Method': method,
+            'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
           // Apply cache headers (respects origin headers if available)
@@ -389,15 +533,24 @@ export default {
           console.log('Last-Modified:', responseHeaders.get('Last-Modified'));
           
           // Create response with all cache headers
-          const response = new Response("Hello from SmartCDN - GET request", {
+          let response = new Response("Hello from SmartCDN - GET request", {
             status: 200,
             headers: responseHeaders,
           });
+          
+          // Set variant cookie if this is a new assignment
+          if (isNewAssignment) {
+            response = setVariantCookie(response, variant);
+          }
           
           // Check for conditional request before caching
           const conditionalCheck = handleConditionalRequest(request, response);
           if (conditionalCheck) {
             console.log('Conditional request validated - returning 304 Not Modified');
+            // Still set cookie on 304 responses if needed
+            if (isNewAssignment) {
+              return setVariantCookie(conditionalCheck, variant);
+            }
             return conditionalCheck;
           }
           
@@ -419,52 +572,75 @@ export default {
             console.warn('Could not read request body:', e.message);
           }
 
-          return new Response("Hello from SmartCDN - POST request received", {
+          let postResponse = new Response("Hello from SmartCDN - POST request received", {
             status: 201,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "X-AB-Test-Variant": variant,
               "Cache-Control": "no-cache, no-store, must-revalidate",
               "Pragma": "no-cache",
               "Expires": "0",
             },
           });
+          
+          // Set variant cookie if this is a new assignment
+          if (isNewAssignment) {
+            postResponse = setVariantCookie(postResponse, variant);
+          }
+          
+          return postResponse;
 
         case 'PUT':
-          return new Response("Hello from SmartCDN - PUT request received", {
+          let putResponse = new Response("Hello from SmartCDN - PUT request received", {
             status: 200,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "X-AB-Test-Variant": variant,
               "Cache-Control": "no-cache, no-store, must-revalidate",
               "Pragma": "no-cache",
               "Expires": "0",
             },
           });
+          if (isNewAssignment) {
+            putResponse = setVariantCookie(putResponse, variant);
+          }
+          return putResponse;
 
         case 'DELETE':
-          return new Response("Hello from SmartCDN - DELETE request received", {
+          let deleteResponse = new Response("Hello from SmartCDN - DELETE request received", {
             status: 200,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "X-AB-Test-Variant": variant,
               "Cache-Control": "no-cache, no-store, must-revalidate",
               "Pragma": "no-cache",
               "Expires": "0",
             },
           });
+          if (isNewAssignment) {
+            deleteResponse = setVariantCookie(deleteResponse, variant);
+          }
+          return deleteResponse;
 
         case 'PATCH':
-          return new Response("Hello from SmartCDN - PATCH request received", {
+          let patchResponse = new Response("Hello from SmartCDN - PATCH request received", {
             status: 200,
             headers: { 
               "Content-Type": "text/plain",
               "X-Request-Method": method,
+              "X-AB-Test-Variant": variant,
               "Cache-Control": "no-cache, no-store, must-revalidate",
               "Pragma": "no-cache",
               "Expires": "0",
             },
           });
+          if (isNewAssignment) {
+            patchResponse = setVariantCookie(patchResponse, variant);
+          }
+          return patchResponse;
 
         case 'OPTIONS':
           // Handle CORS preflight requests
@@ -494,18 +670,32 @@ export default {
           if (cachedHeadResponse) {
             console.log('Cache HIT (HEAD) for:', url.pathname);
             
+            // Add variant header to cached response
+            const cachedHeadResponseWithVariant = new Response(null, {
+              status: cachedHeadResponse.status,
+              statusText: cachedHeadResponse.statusText,
+              headers: cachedHeadResponse.headers,
+            });
+            cachedHeadResponseWithVariant.headers.set('X-AB-Test-Variant', variant);
+            
+            // Set cookie if this is a new assignment
+            let finalCachedHeadResponse = cachedHeadResponseWithVariant;
+            if (isNewAssignment) {
+              finalCachedHeadResponse = setVariantCookie(cachedHeadResponseWithVariant, variant);
+            }
+            
             // Check for conditional request
-            const headConditionalResponse = handleConditionalRequest(request, cachedHeadResponse);
+            const headConditionalResponse = handleConditionalRequest(request, finalCachedHeadResponse);
             if (headConditionalResponse) {
               console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
+              // Still set cookie on 304 responses if needed
+              if (isNewAssignment) {
+                return setVariantCookie(headConditionalResponse, variant);
+              }
               return headConditionalResponse;
             }
             
-            // Return HEAD response with same headers but no body
-            return new Response(null, {
-              status: cachedHeadResponse.status,
-              headers: cachedHeadResponse.headers,
-            });
+            return finalCachedHeadResponse;
           }
           
           console.log('Cache MISS (HEAD) for:', url.pathname);
@@ -520,6 +710,7 @@ export default {
           const headResponseHeaders = new Headers({
             'Content-Type': headContentType,
             'X-Request-Method': method,
+            'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
           // Apply cache headers
@@ -528,15 +719,24 @@ export default {
           const headTtlSeconds = getCacheTTL(url.pathname);
           console.log(`Cache TTL (HEAD): ${headTtlSeconds} seconds (${Math.round(headTtlSeconds / 60)} minutes)`);
           
-          const headResponse = new Response(null, {
+          let headResponse = new Response(null, {
             status: 200,
             headers: headResponseHeaders,
           });
+          
+          // Set variant cookie if this is a new assignment
+          if (isNewAssignment) {
+            headResponse = setVariantCookie(headResponse, variant);
+          }
           
           // Check for conditional request
           const headConditionalCheck = handleConditionalRequest(request, headResponse);
           if (headConditionalCheck) {
             console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
+            // Still set cookie on 304 responses if needed
+            if (isNewAssignment) {
+              return setVariantCookie(headConditionalCheck, variant);
+            }
             return headConditionalCheck;
           }
           
