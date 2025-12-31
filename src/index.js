@@ -1138,6 +1138,210 @@ function transformImageUrlForFormat(url, formatNegotiation) {
 }
 
 /**
+ * Parses image resizing parameters from query string
+ * @param {URL} url - The request URL
+ * @param {Object} deviceInfo - Device information
+ * @param {Object} imageOptParams - Image optimization parameters
+ * @returns {Object} Resizing parameters (width, height, quality, etc.)
+ */
+function parseImageResizeParams(url, deviceInfo, imageOptParams) {
+  const params = {
+    width: null,
+    height: null,
+    quality: null,
+    fit: 'scale-down', // Default fit mode for Cloudflare
+    sharpen: null,
+    blur: null,
+    dpr: deviceInfo.isMobile || deviceInfo.isTablet ? 2 : 1,
+  };
+  
+  // Parse width from query parameter
+  const widthParam = url.searchParams.get('width') || url.searchParams.get('w');
+  if (widthParam) {
+    const width = parseInt(widthParam, 10);
+    if (!isNaN(width) && width > 0) {
+      params.width = width;
+    }
+  }
+  
+  // Parse height from query parameter
+  const heightParam = url.searchParams.get('height') || url.searchParams.get('h');
+  if (heightParam) {
+    const height = parseInt(heightParam, 10);
+    if (!isNaN(height) && height > 0) {
+      params.height = height;
+    }
+  }
+  
+  // Parse quality from query parameter
+  const qualityParam = url.searchParams.get('quality') || url.searchParams.get('q');
+  if (qualityParam) {
+    const quality = parseInt(qualityParam, 10);
+    if (!isNaN(quality) && quality >= 0 && quality <= 100) {
+      params.quality = quality;
+    }
+  } else {
+    // Use device-specific default quality if not specified
+    params.quality = imageOptParams.quality;
+  }
+  
+  // Parse fit mode
+  const fitParam = url.searchParams.get('fit');
+  if (fitParam && ['scale-down', 'contain', 'cover', 'crop', 'pad'].includes(fitParam)) {
+    params.fit = fitParam;
+  }
+  
+  // Parse sharpen
+  const sharpenParam = url.searchParams.get('sharpen');
+  if (sharpenParam) {
+    const sharpen = parseInt(sharpenParam, 10);
+    if (!isNaN(sharpen) && sharpen >= 0) {
+      params.sharpen = sharpen;
+    }
+  }
+  
+  // Parse blur
+  const blurParam = url.searchParams.get('blur');
+  if (blurParam) {
+    const blur = parseInt(blurParam, 10);
+    if (!isNaN(blur) && blur >= 0) {
+      params.blur = blur;
+    }
+  }
+  
+  // Apply automatic mobile reduction: reduce dimensions by 50% if no width specified
+  if (deviceInfo.isMobile && !params.width && !params.height) {
+    // If no explicit dimensions, we'll apply reduction when building the resize URL
+    params.autoReduce = true;
+    params.reductionFactor = 0.5;
+  }
+  
+  return params;
+}
+
+/**
+ * Builds a Cloudflare Image Resizing URL
+ * Cloudflare Image Resizing uses the /cdn-cgi/image/ path prefix
+ * @param {URL} originalUrl - The original image URL
+ * @param {Object} resizeParams - Resizing parameters
+ * @param {Object} formatNegotiation - Format negotiation result (optional)
+ * @returns {URL} The Cloudflare Image Resizing URL
+ */
+function buildCloudflareImageResizeUrl(originalUrl, resizeParams, formatNegotiation = null) {
+  // Build the path for Cloudflare Image Resizing
+  // Format: /cdn-cgi/image/{options}/{original-path}
+  const options = [];
+  
+  // Add width
+  if (resizeParams.width) {
+    options.push(`width=${resizeParams.width}`);
+  }
+  
+  // Add height
+  if (resizeParams.height) {
+    options.push(`height=${resizeParams.height}`);
+  }
+  
+  // Add quality
+  if (resizeParams.quality !== null) {
+    options.push(`quality=${resizeParams.quality}`);
+  }
+  
+  // Add fit mode
+  if (resizeParams.fit) {
+    options.push(`fit=${resizeParams.fit}`);
+  }
+  
+  // Add format (from format negotiation)
+  if (formatNegotiation && formatNegotiation.shouldTransform) {
+    options.push(`format=${formatNegotiation.bestFormat}`);
+  }
+  
+  // Add DPR
+  if (resizeParams.dpr && resizeParams.dpr > 1) {
+    options.push(`dpr=${resizeParams.dpr}`);
+  }
+  
+  // Add sharpen
+  if (resizeParams.sharpen !== null) {
+    options.push(`sharpen=${resizeParams.sharpen}`);
+  }
+  
+  // Add blur
+  if (resizeParams.blur !== null) {
+    options.push(`blur=${resizeParams.blur}`);
+  }
+  
+  // Build the new URL
+  const newUrl = new URL(originalUrl);
+  
+  // Get the image path (which may already have A/B routing applied)
+  let imagePath = originalUrl.pathname;
+  
+  // Apply format negotiation to the current path if needed
+  if (formatNegotiation && formatNegotiation.shouldTransform) {
+    // Apply format change to the current pathname
+    const lastDot = imagePath.lastIndexOf('.');
+    if (lastDot !== -1) {
+      const basePath = imagePath.substring(0, lastDot);
+      const extension = `.${formatNegotiation.bestFormat}`;
+      imagePath = basePath + extension;
+    }
+  }
+  
+  // Remove leading slash for Cloudflare format
+  if (imagePath.startsWith('/')) {
+    imagePath = imagePath.substring(1);
+  }
+  
+  // Build Cloudflare Image Resizing path
+  // Format: /cdn-cgi/image/{options}/{path}
+  const optionsStr = options.length > 0 ? options.join(',') : '';
+  const resizePath = optionsStr 
+    ? `/cdn-cgi/image/${optionsStr}/${imagePath}`
+    : `/cdn-cgi/image/${imagePath}`;
+  
+  newUrl.pathname = resizePath;
+  
+  // Preserve original query parameters (except resize params which are now in the path)
+  const preserveParams = ['_format', '_from', '_test', '_variant'];
+  const newSearchParams = new URLSearchParams();
+  for (const [key, value] of originalUrl.searchParams.entries()) {
+    // Skip resize-related params (they're in the path now)
+    if (!['width', 'w', 'height', 'h', 'quality', 'q', 'fit', 'sharpen', 'blur'].includes(key.toLowerCase())) {
+      // But preserve special params
+      if (preserveParams.includes(key) || key.startsWith('_')) {
+        newSearchParams.set(key, value);
+      }
+    }
+  }
+  newUrl.search = newSearchParams.toString();
+  
+  return newUrl;
+}
+
+/**
+ * Determines if image resizing should be applied
+ * @param {URL} url - The request URL
+ * @param {Object} deviceInfo - Device information
+ * @param {Object} imageOptParams - Image optimization parameters
+ * @returns {boolean} True if resizing should be applied
+ */
+function shouldResizeImage(url, deviceInfo, imageOptParams) {
+  if (!isImagePath(url.pathname)) {
+    return false;
+  }
+  
+  // Check if resize parameters are present
+  const hasWidth = url.searchParams.has('width') || url.searchParams.has('w');
+  const hasHeight = url.searchParams.has('height') || url.searchParams.has('h');
+  const hasQuality = url.searchParams.has('quality') || url.searchParams.has('q');
+  
+  // Resize if explicit params are present OR if mobile device (auto-reduce)
+  return hasWidth || hasHeight || hasQuality || deviceInfo.isMobile;
+}
+
+/**
  * Hashes a string to a number for consistent variant assignment
  * @param {string} input - The string to hash
  * @returns {number} A hash value between 0 and 100
@@ -1346,21 +1550,11 @@ export default {
       const deviceInfo = detectDevice(request);
       const imageOptParams = getImageOptimizationParams(deviceInfo);
 
-      // Content negotiation for images
+      // Content negotiation for images (before A/B routing)
       let formatNegotiation = null;
-      let imageUrl = url;
       if (isImagePath(url.pathname)) {
         const acceptInfo = parseAcceptHeader(request);
         formatNegotiation = negotiateImageFormat(url.pathname, acceptInfo);
-        
-        if (formatNegotiation.shouldTransform) {
-          // Transform URL to request optimized format
-          imageUrl = transformImageUrlForFormat(url, formatNegotiation);
-          console.log(`Content Negotiation: ${formatNegotiation.originalFormat} -> ${formatNegotiation.bestFormat}`);
-          console.log(`Transformed Image URL: ${imageUrl.pathname}`);
-        } else {
-          console.log(`Content Negotiation: Using original format (${formatNegotiation.originalFormat})`);
-        }
       }
 
       // Get primary A/B test for this path (highest priority)
@@ -1402,6 +1596,46 @@ export default {
         }
       }
 
+      // Image resizing (after A/B routing, so we can resize the A/B routed image if needed)
+      let resizeParams = null;
+      let imageUrl = routingUrl; // Start with A/B routed URL (or original if no routing)
+      let shouldResize = false;
+      
+      if (isImagePath(url.pathname)) {
+        // Parse resize parameters from original URL
+        resizeParams = parseImageResizeParams(url, deviceInfo, imageOptParams);
+        shouldResize = shouldResizeImage(url, deviceInfo, imageOptParams);
+        
+        if (shouldResize) {
+          // Apply automatic mobile reduction if no width specified
+          if (resizeParams.autoReduce && !resizeParams.width && !resizeParams.height) {
+            // For mobile devices without explicit dimensions, apply 50% reduction
+            // We'll use a reasonable default width for mobile
+            const defaultMobileWidth = Math.floor(imageOptParams.maxWidth * 0.5);
+            resizeParams.width = defaultMobileWidth;
+            console.log(`Image Resizing: Auto-reducing for mobile device - setting width to ${defaultMobileWidth}px (50% of max)`);
+          }
+          
+          // Build Cloudflare Image Resizing URL using the A/B routed URL as base
+          imageUrl = buildCloudflareImageResizeUrl(routingUrl, resizeParams, formatNegotiation);
+          console.log(`Image Resizing: Applied - Width: ${resizeParams.width || 'auto'}, Height: ${resizeParams.height || 'auto'}, Quality: ${resizeParams.quality}`);
+          console.log(`Resized Image URL: ${imageUrl.pathname}`);
+        } else if (formatNegotiation && formatNegotiation.shouldTransform) {
+          // Only format negotiation, no resizing - apply to A/B routed URL
+          imageUrl = transformImageUrlForFormat(routingUrl, formatNegotiation);
+          console.log(`Content Negotiation: ${formatNegotiation.originalFormat} -> ${formatNegotiation.bestFormat}`);
+          console.log(`Transformed Image URL: ${imageUrl.pathname}`);
+        } else {
+          // No resizing or format negotiation
+          imageUrl = routingUrl;
+          if (formatNegotiation) {
+            console.log(`Content Negotiation: Using original format (${formatNegotiation.originalFormat})`);
+          }
+        }
+      } else {
+        imageUrl = routingUrl; // Not an image, use A/B routed URL
+      }
+
       // Log basic request information
       console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
       console.log('Request URL:', url.href);
@@ -1425,31 +1659,14 @@ export default {
       switch (method) {
         case 'GET':
           // Generate custom cache key (normalizes query params)
-          // Combine A/B test routing with format negotiation
+          // imageUrl already includes: A/B routing + format negotiation + resizing (if applicable)
           const cache = caches.default;
-          let finalUrl = url;
-          
-          // Apply format negotiation first (if image)
-          if (formatNegotiation && formatNegotiation.shouldTransform) {
-            finalUrl = imageUrl;
-          }
-          
-          // Then apply A/B test routing
-          if (testInfo && testInfo.routed) {
-            // Combine format negotiation with A/B test routing
-            const combinedUrl = new URL(finalUrl);
-            combinedUrl.pathname = routingUrl.pathname;
-            if (routingUrl.origin !== url.origin) {
-              combinedUrl.origin = routingUrl.origin;
-            }
-            finalUrl = combinedUrl;
-          }
-          
+          const finalUrl = imageUrl; // imageUrl is the final URL after all transformations
           const cacheKeyUrl = finalUrl;
           let cacheKey = generateCacheKey(request, cacheKeyUrl);
           
-          // Add test ID, variant, and format to cache key
-          // This ensures different variants and formats are cached separately
+          // Add test ID, variant, format, and resize params to cache key
+          // This ensures different variants, formats, and sizes are cached separately
           const enhancedCacheKeyUrl = new URL(cacheKey.url);
           if (testInfo) {
             enhancedCacheKeyUrl.searchParams.set('_test', testInfo.testId);
@@ -1457,6 +1674,11 @@ export default {
           }
           if (formatNegotiation && formatNegotiation.shouldTransform) {
             enhancedCacheKeyUrl.searchParams.set('_format', formatNegotiation.bestFormat);
+          }
+          if (resizeParams) {
+            if (resizeParams.width) enhancedCacheKeyUrl.searchParams.set('_width', resizeParams.width.toString());
+            if (resizeParams.height) enhancedCacheKeyUrl.searchParams.set('_height', resizeParams.height.toString());
+            if (resizeParams.quality !== null) enhancedCacheKeyUrl.searchParams.set('_quality', resizeParams.quality.toString());
           }
           cacheKey = new Request(enhancedCacheKeyUrl.toString(), {
             method: request.method,
@@ -1504,6 +1726,15 @@ export default {
                 cachedResponseWithTest.headers.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
                 cachedResponseWithTest.headers.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
                 cachedResponseWithTest.headers.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+              }
+              
+              // Add image resizing information
+              if (resizeParams) {
+                cachedResponseWithTest.headers.set('X-Image-Resized', shouldResize ? 'true' : 'false');
+                if (resizeParams.width) cachedResponseWithTest.headers.set('X-Image-Width', resizeParams.width.toString());
+                if (resizeParams.height) cachedResponseWithTest.headers.set('X-Image-Height', resizeParams.height.toString());
+                if (resizeParams.quality !== null) cachedResponseWithTest.headers.set('X-Image-Quality-Applied', resizeParams.quality.toString());
+                if (resizeParams.autoReduce) cachedResponseWithTest.headers.set('X-Image-Auto-Reduced', 'true');
               }
             }
             
@@ -1589,6 +1820,15 @@ export default {
               responseHeaders.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
               responseHeaders.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
               responseHeaders.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+            }
+            
+            // Add image resizing information
+            if (resizeParams) {
+              responseHeaders.set('X-Image-Resized', shouldResize ? 'true' : 'false');
+              if (resizeParams.width) responseHeaders.set('X-Image-Width', resizeParams.width.toString());
+              if (resizeParams.height) responseHeaders.set('X-Image-Height', resizeParams.height.toString());
+              if (resizeParams.quality !== null) responseHeaders.set('X-Image-Quality-Applied', resizeParams.quality.toString());
+              if (resizeParams.autoReduce) responseHeaders.set('X-Image-Auto-Reduced', 'true');
             }
           }
           
@@ -1775,29 +2015,13 @@ export default {
 
         case 'HEAD':
           // Generate custom cache key for HEAD requests too
-          // Combine A/B test routing with format negotiation
+          // imageUrl already includes: A/B routing + format negotiation + resizing (if applicable)
           const headCache = caches.default;
-          let headFinalUrl = url;
-          
-          // Apply format negotiation first (if image)
-          if (formatNegotiation && formatNegotiation.shouldTransform) {
-            headFinalUrl = imageUrl;
-          }
-          
-          // Then apply A/B test routing
-          if (testInfo && testInfo.routed) {
-            const headCombinedUrl = new URL(headFinalUrl);
-            headCombinedUrl.pathname = routingUrl.pathname;
-            if (routingUrl.origin !== url.origin) {
-              headCombinedUrl.origin = routingUrl.origin;
-            }
-            headFinalUrl = headCombinedUrl;
-          }
-          
+          const headFinalUrl = imageUrl; // imageUrl is the final URL after all transformations
           const headCacheKeyUrl = headFinalUrl;
           let headCacheKey = generateCacheKey(request, headCacheKeyUrl);
           
-          // Add test ID, variant, and format to cache key
+          // Add test ID, variant, format, and resize params to cache key
           const headEnhancedCacheKeyUrl = new URL(headCacheKey.url);
           if (testInfo) {
             headEnhancedCacheKeyUrl.searchParams.set('_test', testInfo.testId);
@@ -1805,6 +2029,11 @@ export default {
           }
           if (formatNegotiation && formatNegotiation.shouldTransform) {
             headEnhancedCacheKeyUrl.searchParams.set('_format', formatNegotiation.bestFormat);
+          }
+          if (resizeParams) {
+            if (resizeParams.width) headEnhancedCacheKeyUrl.searchParams.set('_width', resizeParams.width.toString());
+            if (resizeParams.height) headEnhancedCacheKeyUrl.searchParams.set('_height', resizeParams.height.toString());
+            if (resizeParams.quality !== null) headEnhancedCacheKeyUrl.searchParams.set('_quality', resizeParams.quality.toString());
           }
           headCacheKey = new Request(headEnhancedCacheKeyUrl.toString(), {
             method: request.method,
@@ -1852,6 +2081,15 @@ export default {
                 cachedHeadResponseWithTest.headers.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
                 cachedHeadResponseWithTest.headers.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
                 cachedHeadResponseWithTest.headers.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+              }
+              
+              // Add image resizing information
+              if (resizeParams) {
+                cachedHeadResponseWithTest.headers.set('X-Image-Resized', shouldResize ? 'true' : 'false');
+                if (resizeParams.width) cachedHeadResponseWithTest.headers.set('X-Image-Width', resizeParams.width.toString());
+                if (resizeParams.height) cachedHeadResponseWithTest.headers.set('X-Image-Height', resizeParams.height.toString());
+                if (resizeParams.quality !== null) cachedHeadResponseWithTest.headers.set('X-Image-Quality-Applied', resizeParams.quality.toString());
+                if (resizeParams.autoReduce) cachedHeadResponseWithTest.headers.set('X-Image-Auto-Reduced', 'true');
               }
             }
             
@@ -1934,6 +2172,15 @@ export default {
               headResponseHeaders.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
               headResponseHeaders.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
               headResponseHeaders.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+            }
+            
+            // Add image resizing information
+            if (resizeParams) {
+              headResponseHeaders.set('X-Image-Resized', shouldResize ? 'true' : 'false');
+              if (resizeParams.width) headResponseHeaders.set('X-Image-Width', resizeParams.width.toString());
+              if (resizeParams.height) headResponseHeaders.set('X-Image-Height', resizeParams.height.toString());
+              if (resizeParams.quality !== null) headResponseHeaders.set('X-Image-Quality-Applied', resizeParams.quality.toString());
+              if (resizeParams.autoReduce) headResponseHeaders.set('X-Image-Auto-Reduced', 'true');
             }
           }
           
