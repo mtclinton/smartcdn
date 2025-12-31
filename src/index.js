@@ -1,99 +1,317 @@
 /**
- * A/B Testing Configuration
- * Configure which paths should be tested and routing behavior
+ * A/B Testing Configuration System
+ * 
+ * This system supports multiple concurrent A/B tests with flexible routing strategies.
+ * Each test can have its own traffic allocation, path matching, and routing configuration.
+ * 
+ * To add a new test, simply add a new object to the AB_TESTS array below.
  */
-const AB_TEST_CONFIG = {
-  // Enable or disable A/B testing globally
-  enabled: true,
-  
-  // Paths to test (supports exact matches, prefixes, or regex patterns)
-  // Empty array means test all paths
-  testPaths: [
-    // Example: test all HTML pages
-    { pattern: /\.html?$/i, type: 'regex' },
-    // Example: test specific paths
-    { pattern: '/', type: 'exact' },
-    { pattern: '/index', type: 'exact' },
-    // Example: test paths with prefix
-    { pattern: '/products', type: 'prefix' },
-  ],
-  
-  // Paths to exclude from A/B testing (takes precedence over testPaths)
-  excludePaths: [
-    { pattern: /\.(css|js|jpg|jpeg|png|gif|webp|svg|ico|woff|woff2|ttf|otf)$/i, type: 'regex' },
-    { pattern: '/api/', type: 'prefix' },
-    { pattern: '/admin', type: 'prefix' },
-    { pattern: '/static', type: 'prefix' },
-  ],
-  
-  // Routing configuration for variant B
-  variantBRouting: {
-    // Strategy: 'path-suffix' or 'origin'
-    strategy: 'path-suffix',
-    
-    // For path-suffix strategy: suffix to add (e.g., '-v2')
-    pathSuffix: '-v2',
-    
-    // For origin strategy: alternative origin URL
-    // originUrl: 'https://v2.example.com',
-    
-    // File extensions to apply suffix to (empty = all)
-    // For path-suffix: if file has extension, insert before extension
-    // Example: /page.html -> /page-v2.html
-    applyToExtensions: ['html', 'htm', 'js', 'css'],
-  },
-};
+
+// Global master switch - set to false to disable ALL tests
+const AB_TESTING_GLOBAL_ENABLED = true;
 
 /**
- * Checks if A/B testing is enabled
+ * A/B Test Configuration Array
+ * Each object represents a single A/B test
+ */
+const AB_TESTS = [
+  // Example 1: Simple 50/50 homepage test
+  {
+    id: 'homepage-redesign-2025',
+    name: 'Homepage Redesign Test',
+    enabled: true,
+    priority: 10,
+    trafficAllocation: { A: 50, B: 50 },
+    pathMatching: {
+      include: ['/'],
+      exclude: [],
+      matchType: 'exact',
+    },
+    variants: {
+      A: {
+        strategy: 'path-suffix',
+        config: { suffix: '' }, // Original path
+      },
+      B: {
+        strategy: 'path-suffix',
+        config: { suffix: '-v2' },
+      },
+    },
+    description: 'Testing new homepage design vs current',
+  },
+
+  // Example 2: 80/20 gradual rollout test
+  {
+    id: 'pricing-page-update',
+    name: 'Pricing Page Update',
+    enabled: true,
+    priority: 8,
+    trafficAllocation: { A: 80, B: 20 },
+    pathMatching: {
+      include: ['/pricing', '/pricing/*'],
+      exclude: ['/pricing/admin/*'],
+      matchType: 'wildcard',
+    },
+    variants: {
+      A: {
+        strategy: 'path-suffix',
+        config: { suffix: '' },
+      },
+      B: {
+        strategy: 'different-origin',
+        config: { origin: 'https://v2.example.com' },
+      },
+    },
+    description: 'Gradual rollout of new pricing page',
+  },
+
+  // Example 3: A/B/C test with three variants
+  {
+    id: 'landing-page-variants',
+    name: 'Landing Page A/B/C Test',
+    enabled: true,
+    priority: 5,
+    trafficAllocation: { A: 33, B: 33, C: 34 },
+    pathMatching: {
+      include: ['/landing/*'],
+      exclude: [],
+      matchType: 'wildcard',
+    },
+    variants: {
+      A: {
+        strategy: 'path-suffix',
+        config: { suffix: '' },
+      },
+      B: {
+        strategy: 'path-suffix',
+        config: { suffix: '-variant-b' },
+      },
+      C: {
+        strategy: 'query-param',
+        config: { param: 'variant=c' },
+      },
+    },
+    description: 'Testing three different landing page designs',
+  },
+
+  // Example 4: Subdomain routing test
+  {
+    id: 'mobile-app-redirect',
+    name: 'Mobile App Redirect Test',
+    enabled: false, // Disabled example
+    priority: 3,
+    trafficAllocation: { A: 50, B: 50 },
+    pathMatching: {
+      include: ['/app/*'],
+      exclude: [],
+      matchType: 'wildcard',
+    },
+    variants: {
+      A: {
+        strategy: 'path-suffix',
+        config: { suffix: '' },
+      },
+      B: {
+        strategy: 'subdomain',
+        config: { subdomain: 'app' },
+      },
+    },
+    description: 'Testing subdomain routing for mobile app',
+  },
+];
+
+/**
+ * ============================================================================
+ * A/B TESTING CORE FUNCTIONS
+ * ============================================================================
+ */
+
+/**
+ * Checks if A/B testing is globally enabled
  * @returns {boolean} True if A/B testing is enabled
  */
 function isABTestingEnabled() {
-  return AB_TEST_CONFIG.enabled;
+  return AB_TESTING_GLOBAL_ENABLED;
 }
 
 /**
- * Checks if a path matches a pattern
- * @param {string} pathname - The path to check
- * @param {Object} patternConfig - Pattern configuration with 'pattern' and 'type'
- * @returns {boolean} True if path matches
+ * Validates a single test configuration
+ * @param {Object} test - Test configuration object
+ * @returns {Object} { valid: boolean, errors: string[] }
  */
-function matchesPattern(pathname, patternConfig) {
-  const { pattern, type } = patternConfig;
+function validateTestConfig(test) {
+  const errors = [];
   
-  switch (type) {
-    case 'exact':
-      return pathname === pattern;
-    case 'prefix':
-      return pathname.startsWith(pattern);
-    case 'regex':
-      return pattern.test(pathname);
-    default:
-      return false;
+  if (!test.id || typeof test.id !== 'string') {
+    errors.push(`Test ${test.id || 'unknown'}: Missing or invalid 'id'`);
   }
-}
-
-/**
- * Checks if a path should be included in A/B testing
- * @param {string} pathname - The request pathname
- * @returns {boolean} True if path should be tested
- */
-function shouldTestPath(pathname) {
-  // Check exclusions first (takes precedence)
-  for (const excludePattern of AB_TEST_CONFIG.excludePaths) {
-    if (matchesPattern(pathname, excludePattern)) {
-      return false;
+  
+  if (typeof test.enabled !== 'boolean') {
+    errors.push(`Test ${test.id}: Missing or invalid 'enabled' flag`);
+  }
+  
+  if (!test.trafficAllocation || typeof test.trafficAllocation !== 'object') {
+    errors.push(`Test ${test.id}: Missing or invalid 'trafficAllocation'`);
+  } else {
+    const percentages = Object.values(test.trafficAllocation);
+    const sum = percentages.reduce((a, b) => a + b, 0);
+    if (Math.abs(sum - 100) > 0.01) {
+      errors.push(`Test ${test.id}: trafficAllocation percentages must sum to 100 (got ${sum})`);
+    }
+    if (percentages.some(p => p < 0 || p > 100)) {
+      errors.push(`Test ${test.id}: trafficAllocation percentages must be between 0 and 100`);
     }
   }
   
-  // If testPaths is empty, test all paths (except excluded)
-  if (AB_TEST_CONFIG.testPaths.length === 0) {
-    return true;
+  if (!test.variants || typeof test.variants !== 'object') {
+    errors.push(`Test ${test.id}: Missing or invalid 'variants'`);
+  } else {
+    const variantKeys = Object.keys(test.variants);
+    const allocationKeys = Object.keys(test.trafficAllocation || {});
+    if (variantKeys.length !== allocationKeys.length) {
+      errors.push(`Test ${test.id}: Number of variants doesn't match trafficAllocation keys`);
+    }
+    variantKeys.forEach(variant => {
+      if (!test.variants[variant].strategy) {
+        errors.push(`Test ${test.id}: Variant ${variant} missing 'strategy'`);
+      }
+    });
   }
   
-  // Check if path matches any test pattern
-  for (const testPattern of AB_TEST_CONFIG.testPaths) {
-    if (matchesPattern(pathname, testPattern)) {
+  if (!test.pathMatching || typeof test.pathMatching !== 'object') {
+    errors.push(`Test ${test.id}: Missing or invalid 'pathMatching'`);
+  }
+  
+  if (typeof test.priority !== 'number') {
+    errors.push(`Test ${test.id}: Missing or invalid 'priority' (must be a number)`);
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Validates the entire A/B testing configuration
+ * @returns {Object} { valid: boolean, errors: string[], warnings: string[] }
+ */
+function validateABTestConfig() {
+  const errors = [];
+  const warnings = [];
+  
+  if (!Array.isArray(AB_TESTS)) {
+    errors.push('AB_TESTS must be an array');
+    return { valid: false, errors, warnings };
+  }
+  
+  const testIds = new Set();
+  
+  AB_TESTS.forEach((test, index) => {
+    // Check for duplicate IDs
+    if (testIds.has(test.id)) {
+      errors.push(`Duplicate test ID: ${test.id}`);
+    }
+    testIds.add(test.id);
+    
+    // Validate individual test
+    const validation = validateTestConfig(test);
+    if (!validation.valid) {
+      errors.push(...validation.errors);
+    }
+    
+    // Check date ranges
+    if (test.startDate && test.endDate) {
+      const start = new Date(test.startDate);
+      const end = new Date(test.endDate);
+      if (start > end) {
+        errors.push(`Test ${test.id}: startDate must be before endDate`);
+      }
+      const now = new Date();
+      if (end < now) {
+        warnings.push(`Test ${test.id}: endDate is in the past`);
+      }
+    }
+  });
+  
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Checks if a path matches a pattern based on match type
+ * @param {string} pathname - The path to check
+ * @param {string} pattern - The pattern to match against
+ * @param {string} matchType - 'exact', 'prefix', 'regex', or 'wildcard'
+ * @returns {boolean} True if path matches
+ */
+function matchesPathPattern(pathname, pattern, matchType) {
+  switch (matchType) {
+    case 'exact':
+      return pathname === pattern;
+    
+    case 'prefix':
+      return pathname.startsWith(pattern);
+    
+    case 'regex':
+      try {
+        const regex = new RegExp(pattern);
+        return regex.test(pathname);
+      } catch (e) {
+        console.error(`Invalid regex pattern: ${pattern}`, e);
+        return false;
+      }
+    
+    case 'wildcard':
+      // Convert wildcard pattern to regex
+      // * matches any characters except /
+      // ** matches any characters including /
+      const regexPattern = pattern
+        .replace(/\*\*/g, '___DOUBLE_STAR___')
+        .replace(/\*/g, '[^/]*')
+        .replace(/___DOUBLE_STAR___/g, '.*');
+      try {
+        const regex = new RegExp(`^${regexPattern}$`);
+        return regex.test(pathname);
+      } catch (e) {
+        console.error(`Invalid wildcard pattern: ${pattern}`, e);
+        return false;
+      }
+    
+    default:
+      console.warn(`Unknown matchType: ${matchType}, defaulting to exact match`);
+      return pathname === pattern;
+  }
+}
+
+/**
+ * Checks if a path matches a test's path matching rules
+ * @param {string} pathname - The path to check
+ * @param {Object} pathMatching - Path matching configuration
+ * @returns {boolean} True if path matches the test
+ */
+function pathMatchesTest(pathname, pathMatching) {
+  const { include, exclude, matchType } = pathMatching;
+  
+  // Check exclusions first (takes precedence)
+  if (exclude && exclude.length > 0) {
+    for (const excludePattern of exclude) {
+      if (matchesPathPattern(pathname, excludePattern, matchType)) {
+        return false;
+      }
+    }
+  }
+  
+  // Check includes
+  if (!include || include.length === 0) {
+    return false; // No includes means no match
+  }
+  
+  for (const includePattern of include) {
+    if (matchesPathPattern(pathname, includePattern, matchType)) {
       return true;
     }
   }
@@ -102,22 +320,127 @@ function shouldTestPath(pathname) {
 }
 
 /**
- * Transforms a URL path based on variant B routing strategy
- * @param {string} pathname - The original pathname
- * @param {string} variant - The assigned variant ('A' or 'B')
- * @returns {string} The transformed pathname (or original if variant A)
+ * Checks if a test is currently active (enabled, within date range)
+ * @param {Object} test - Test configuration
+ * @returns {boolean} True if test is active
  */
-function transformPathForVariant(pathname, variant) {
-  // Variant A: return original path
-  if (variant === 'A') {
-    return pathname;
+function isTestActive(test) {
+  if (!test.enabled) {
+    return false;
   }
   
-  // Variant B: apply routing transformation
-  const routing = AB_TEST_CONFIG.variantBRouting;
+  const now = new Date();
   
-  if (routing.strategy === 'path-suffix') {
-    const suffix = routing.pathSuffix || '-v2';
+  if (test.startDate) {
+    const start = new Date(test.startDate);
+    if (now < start) {
+      return false;
+    }
+  }
+  
+  if (test.endDate) {
+    const end = new Date(test.endDate);
+    if (now > end) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+/**
+ * Gets all active tests that apply to a given path
+ * @param {string} pathname - The request pathname
+ * @returns {Array} Array of test objects, sorted by priority (highest first)
+ */
+function getActiveTests(pathname) {
+  if (!isABTestingEnabled()) {
+    return [];
+  }
+  
+  const activeTests = AB_TESTS
+    .filter(test => isTestActive(test))
+    .filter(test => pathMatchesTest(pathname, test.pathMatching))
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  
+  return activeTests;
+}
+
+/**
+ * Gets the highest priority active test for a path
+ * @param {string} pathname - The request pathname
+ * @returns {Object|null} The highest priority test or null
+ */
+function getPrimaryTest(pathname) {
+  const activeTests = getActiveTests(pathname);
+  return activeTests.length > 0 ? activeTests[0] : null;
+}
+
+/**
+ * Hashes a string to a number between 0 and 100 for consistent variant assignment
+ * @param {string} input - The string to hash
+ * @returns {number} Hash value between 0 and 100
+ */
+function hashToPercentage(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash) % 100;
+}
+
+/**
+ * Determines which variant a user should be assigned to for a specific test
+ * @param {Object} test - Test configuration
+ * @param {string} userId - User identifier (IP address or cookie value)
+ * @returns {string} Variant identifier (A, B, C, etc.)
+ */
+function getVariantForTest(test, userId) {
+  const { trafficAllocation } = test;
+  const hashValue = hashToPercentage(`${test.id}-${userId}`);
+  
+  // Build cumulative ranges
+  let cumulative = 0;
+  const variants = Object.keys(trafficAllocation).sort();
+  
+  for (const variant of variants) {
+    cumulative += trafficAllocation[variant];
+    if (hashValue < cumulative) {
+      return variant;
+    }
+  }
+  
+  // Fallback to first variant (shouldn't happen if config is valid)
+  return variants[0] || 'A';
+}
+
+/**
+ * ============================================================================
+ * ROUTING STRATEGIES
+ * ============================================================================
+ * Each strategy is a function that transforms a URL based on variant configuration
+ */
+
+/**
+ * Routing Strategy Registry
+ * Maps strategy names to their implementation functions
+ */
+const ROUTING_STRATEGIES = {
+  /**
+   * Path Suffix Strategy
+   * Adds a suffix to the path (e.g., /page.html -> /page-v2.html)
+   * Config: { suffix: string, applyToExtensions?: string[] }
+   */
+  'path-suffix': (url, variantConfig) => {
+    const { suffix = '' } = variantConfig.config || {};
+    if (!suffix) {
+      return url; // No transformation
+    }
+    
+    const newUrl = new URL(url);
+    const pathname = newUrl.pathname;
     
     // Check if path has a file extension
     const lastDot = pathname.lastIndexOf('.');
@@ -127,73 +450,102 @@ function transformPathForVariant(pathname, variant) {
       // Has file extension
       const extension = pathname.substring(lastDot);
       const basePath = pathname.substring(0, lastDot);
-      
-      // Check if we should apply suffix to this extension
       const extWithoutDot = extension.substring(1).toLowerCase();
-      const applyToExtensions = routing.applyToExtensions || [];
+      const applyToExtensions = variantConfig.config?.applyToExtensions || [];
       
+      // If applyToExtensions is empty or includes this extension, insert suffix before extension
       if (applyToExtensions.length === 0 || applyToExtensions.includes(extWithoutDot)) {
-        // Insert suffix before extension
-        return `${basePath}${suffix}${extension}`;
+        newUrl.pathname = `${basePath}${suffix}${extension}`;
+        return newUrl;
       }
     }
     
     // No extension or extension not in list, append suffix
-    return `${pathname}${suffix}`;
-  }
+    newUrl.pathname = `${pathname}${suffix}`;
+    return newUrl;
+  },
   
-  // For 'origin' strategy, path transformation might not be needed
-  // (origin change is handled separately)
-  return pathname;
-}
+  /**
+   * Different Origin Strategy
+   * Routes to a completely different origin
+   * Config: { origin: string }
+   */
+  'different-origin': (url, variantConfig) => {
+    const { origin } = variantConfig.config || {};
+    if (!origin) {
+      return url; // No transformation
+    }
+    
+    return new URL(url.pathname + url.search, origin);
+  },
+  
+  /**
+   * Query Parameter Strategy
+   * Adds a query parameter to the URL
+   * Config: { param: string } (e.g., "version=new" or "variant=b")
+   */
+  'query-param': (url, variantConfig) => {
+    const { param } = variantConfig.config || {};
+    if (!param) {
+      return url; // No transformation
+    }
+    
+    const newUrl = new URL(url);
+    const [key, value] = param.split('=');
+    if (key && value) {
+      newUrl.searchParams.set(key.trim(), value.trim());
+    }
+    return newUrl;
+  },
+  
+  /**
+   * Subdomain Strategy
+   * Changes the subdomain of the URL
+   * Config: { subdomain: string }
+   */
+  'subdomain': (url, variantConfig) => {
+    const { subdomain } = variantConfig.config || {};
+    if (!subdomain) {
+      return url; // No transformation
+    }
+    
+    const newUrl = new URL(url);
+    const hostname = newUrl.hostname;
+    const parts = hostname.split('.');
+    
+    if (parts.length >= 2) {
+      // Replace first part (subdomain) with new subdomain
+      parts[0] = subdomain;
+      newUrl.hostname = parts.join('.');
+    }
+    
+    return newUrl;
+  },
+};
 
 /**
- * Gets the origin URL for variant B if origin strategy is used
- * @param {string} originalUrl - The original request URL
- * @param {string} variant - The assigned variant ('A' or 'B')
- * @returns {string|null} The origin URL for variant B, or null if not applicable
- */
-function getVariantOrigin(originalUrl, variant) {
-  if (variant === 'A') {
-    return null; // Use original origin
-  }
-  
-  const routing = AB_TEST_CONFIG.variantBRouting;
-  if (routing.strategy === 'origin' && routing.originUrl) {
-    return routing.originUrl;
-  }
-  
-  return null;
-}
-
-/**
- * Transforms a request URL based on variant
+ * Transforms a URL based on test and variant
  * @param {URL} url - The original URL
- * @param {string} variant - The assigned variant ('A' or 'B')
+ * @param {Object} test - Test configuration
+ * @param {string} variant - Assigned variant (A, B, C, etc.)
  * @returns {URL} The transformed URL
  */
-function transformUrlForVariant(url, variant) {
-  // Check if this path should be tested
-  if (!shouldTestPath(url.pathname)) {
+function transformUrlForTest(url, test, variant) {
+  const variantConfig = test.variants[variant];
+  if (!variantConfig) {
+    console.warn(`Test ${test.id}: Variant ${variant} not found`);
     return url;
   }
   
-  // Transform path
-  const transformedPath = transformPathForVariant(url.pathname, variant);
+  const strategy = variantConfig.strategy;
+  const strategyFunction = ROUTING_STRATEGIES[strategy];
   
-  // Check for origin change
-  const variantOrigin = getVariantOrigin(url.href, variant);
-  
-  if (variantOrigin) {
-    // Create new URL with different origin
-    const newUrl = new URL(transformedPath + url.search, variantOrigin);
-    return newUrl;
+  if (!strategyFunction) {
+    console.warn(`Test ${test.id}: Unknown routing strategy: ${strategy}`);
+    return url;
   }
   
-  // Just update the pathname
-  const newUrl = new URL(url);
-  newUrl.pathname = transformedPath;
-  return newUrl;
+  return strategyFunction(url, variantConfig);
 }
 
 /**
@@ -494,40 +846,54 @@ function getVariantFromHash(hashValue, splitPercent = 50) {
 }
 
 /**
- * Gets or assigns an A/B test variant for a user
+ * Parses cookies from request header
+ * @param {Request} request - The incoming request
+ * @returns {Object} Object mapping cookie names to values
+ */
+function parseCookies(request) {
+  const cookieHeader = request.headers.get('Cookie');
+  if (!cookieHeader) {
+    return {};
+  }
+  
+  return cookieHeader.split(';').reduce((acc, cookie) => {
+    const [key, value] = cookie.trim().split('=');
+    if (key && value) {
+      acc[key.trim()] = decodeURIComponent(value);
+    }
+    return acc;
+  }, {});
+}
+
+/**
+ * Gets or assigns a variant for a specific test
  * Checks cookie first, then falls back to IP-based assignment
  * @param {Request} request - The incoming request
- * @returns {Object} Object with variant ('A' or 'B') and isNewAssignment (boolean)
+ * @param {Object} test - Test configuration
+ * @returns {Object} Object with variant and isNewAssignment (boolean)
  */
-function getOrAssignVariant(request) {
-  const cookieName = 'smartcdn_variant';
+function getOrAssignVariantForTest(request, test) {
+  const cookieName = `smartcdn_test_${test.id}`;
+  const cookies = parseCookies(request);
   
   // Check for existing cookie
-  const cookieHeader = request.headers.get('Cookie');
-  if (cookieHeader) {
-    const cookies = cookieHeader.split(';').reduce((acc, cookie) => {
-      const [key, value] = cookie.trim().split('=');
-      if (key && value) {
-        acc[key.trim()] = decodeURIComponent(value);
-      }
-      return acc;
-    }, {});
-    
-    if (cookies[cookieName] && (cookies[cookieName] === 'A' || cookies[cookieName] === 'B')) {
-      console.log(`A/B Test: Existing variant found in cookie - ${cookies[cookieName]}`);
+  if (cookies[cookieName]) {
+    const variant = cookies[cookieName];
+    // Validate variant exists in test
+    if (test.variants[variant]) {
+      console.log(`A/B Test [${test.id}]: Existing variant found in cookie - ${variant}`);
       return {
-        variant: cookies[cookieName],
+        variant,
         isNewAssignment: false,
       };
     }
   }
   
-  // No valid cookie found, assign based on IP address
+  // No valid cookie found, assign based on IP address + test ID
   const clientIP = getClientIP(request);
-  const hashValue = hashToVariant(clientIP);
-  const variant = getVariantFromHash(hashValue);
+  const variant = getVariantForTest(test, clientIP);
   
-  console.log(`A/B Test: New assignment - IP: ${clientIP}, Hash: ${hashValue}, Variant: ${variant}`);
+  console.log(`A/B Test [${test.id}]: New assignment - IP: ${clientIP}, Variant: ${variant}`);
   
   return {
     variant,
@@ -536,13 +902,14 @@ function getOrAssignVariant(request) {
 }
 
 /**
- * Sets the smartcdn_variant cookie in the response
+ * Sets a test-specific variant cookie in the response
  * @param {Response} response - The response to modify
- * @param {string} variant - The variant ('A' or 'B')
+ * @param {string} testId - The test ID
+ * @param {string} variant - The variant ('A', 'B', 'C', etc.)
  * @returns {Response} The response with the cookie set
  */
-function setVariantCookie(response, variant) {
-  const cookieName = 'smartcdn_variant';
+function setTestVariantCookie(response, testId, variant) {
+  const cookieName = `smartcdn_test_${testId}`;
   const cookieValue = variant;
   const maxAge = 30 * 24 * 60 * 60; // 30 days in seconds
   const expires = new Date(Date.now() + maxAge * 1000).toUTCString();
@@ -641,32 +1008,57 @@ function generateCacheKey(request, url) {
 export default {
   async fetch(request, env, ctx) {
     try {
+      // Validate A/B test configuration on first request (could be optimized with caching)
+      // In production, you might want to validate once at startup
+      const configValidation = validateABTestConfig();
+      if (!configValidation.valid) {
+        console.error('A/B Test Configuration Errors:', configValidation.errors);
+        // Continue with request but log errors
+      }
+      if (configValidation.warnings.length > 0) {
+        console.warn('A/B Test Configuration Warnings:', configValidation.warnings);
+      }
+      
       // Extract request information
       const url = new URL(request.url);
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
 
-      // Get or assign A/B test variant
-      const variantInfo = getOrAssignVariant(request);
-      const variant = variantInfo.variant;
-      const isNewAssignment = variantInfo.isNewAssignment;
-
-      // Check if A/B testing is enabled and if this path should be tested
-      const shouldTest = isABTestingEnabled() && shouldTestPath(url.pathname);
+      // Get primary A/B test for this path (highest priority)
+      const primaryTest = getPrimaryTest(url.pathname);
+      let testInfo = null;
       let routingUrl = url;
       let routingInfo = null;
 
-      if (shouldTest) {
-        // Transform URL based on variant
-        routingUrl = transformUrlForVariant(url, variant);
+      if (primaryTest) {
+        // Get or assign variant for this test
+        const variantInfo = getOrAssignVariantForTest(request, primaryTest);
+        const variant = variantInfo.variant;
+        const isNewAssignment = variantInfo.isNewAssignment;
+
+        // Transform URL based on test and variant
+        routingUrl = transformUrlForTest(url, primaryTest, variant);
+        
+        testInfo = {
+          testId: primaryTest.id,
+          testName: primaryTest.name,
+          variant,
+          isNewAssignment,
+          routed: routingUrl.href !== url.href,
+        };
+
         if (routingUrl.href !== url.href) {
           routingInfo = {
             originalPath: url.pathname,
             routedPath: routingUrl.pathname,
             originalOrigin: url.origin,
             routedOrigin: routingUrl.origin,
-            strategy: AB_TEST_CONFIG.variantBRouting.strategy,
+            strategy: primaryTest.variants[variant].strategy,
           };
+        }
+
+        console.log(`A/B Test [${primaryTest.id}]: Variant ${variant}`, isNewAssignment ? '(new assignment)' : '(from cookie)');
+        if (routingInfo) {
           console.log('A/B Test Routing:', JSON.stringify(routingInfo, null, 2));
         }
       }
@@ -675,10 +1067,14 @@ export default {
       console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
       console.log('Request URL:', url.href);
       console.log('Request Method:', method);
-      console.log('A/B Test Variant:', variant, isNewAssignment ? '(new assignment)' : '(from cookie)');
-      console.log('A/B Testing:', shouldTest ? 'enabled for this path' : 'disabled or path excluded');
-      if (routingInfo) {
-        console.log('Routed URL:', routingUrl.href);
+      if (testInfo) {
+        console.log('A/B Test:', testInfo.testName, `(${testInfo.testId})`);
+        console.log('A/B Test Variant:', testInfo.variant);
+        if (routingInfo) {
+          console.log('Routed URL:', routingUrl.href);
+        }
+      } else {
+        console.log('A/B Testing: No active test for this path');
       }
       console.log('Request Headers:', JSON.stringify(headers, null, 2));
 
@@ -688,14 +1084,15 @@ export default {
           // Generate custom cache key (normalizes query params)
           // Use routed URL if A/B testing is active
           const cache = caches.default;
-          const cacheKeyUrl = shouldTest ? routingUrl : url;
+          const cacheKeyUrl = testInfo && testInfo.routed ? routingUrl : url;
           let cacheKey = generateCacheKey(request, cacheKeyUrl);
           
-          // Add variant to cache key if testing is enabled
+          // Add test ID and variant to cache key if testing is active
           // This ensures different variants are cached separately
-          if (shouldTest) {
+          if (testInfo) {
             const variantCacheKeyUrl = new URL(cacheKey.url);
-            variantCacheKeyUrl.searchParams.set('_variant', variant);
+            variantCacheKeyUrl.searchParams.set('_test', testInfo.testId);
+            variantCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
             cacheKey = new Request(variantCacheKeyUrl.toString(), {
               method: request.method,
               headers: request.headers,
@@ -714,18 +1111,22 @@ export default {
           if (cachedResponse) {
             console.log('Cache HIT for:', url.pathname);
             
-            // Add variant header to cached response
-            const cachedResponseWithVariant = new Response(cachedResponse.body, {
+            // Add test info headers to cached response
+            const cachedResponseWithTest = new Response(cachedResponse.body, {
               status: cachedResponse.status,
               statusText: cachedResponse.statusText,
               headers: cachedResponse.headers,
             });
-            cachedResponseWithVariant.headers.set('X-AB-Test-Variant', variant);
+            
+            if (testInfo) {
+              cachedResponseWithTest.headers.set('X-AB-Test-Id', testInfo.testId);
+              cachedResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
+            }
             
             // Set cookie if this is a new assignment (cookie might have been cleared)
-            let finalCachedResponse = cachedResponseWithVariant;
-            if (isNewAssignment) {
-              finalCachedResponse = setVariantCookie(cachedResponseWithVariant, variant);
+            let finalCachedResponse = cachedResponseWithTest;
+            if (testInfo && testInfo.isNewAssignment) {
+              finalCachedResponse = setTestVariantCookie(cachedResponseWithTest, testInfo.testId, testInfo.variant);
             }
             
             // Check for conditional request (If-None-Match, If-Modified-Since)
@@ -733,8 +1134,8 @@ export default {
             if (conditionalResponse) {
               console.log('Conditional request validated - returning 304 Not Modified');
               // Still set cookie on 304 responses if needed
-              if (isNewAssignment) {
-                return setVariantCookie(conditionalResponse, variant);
+              if (testInfo && testInfo.isNewAssignment) {
+                return setTestVariantCookie(conditionalResponse, testInfo.testId, testInfo.variant);
               }
               return conditionalResponse;
             }
@@ -747,7 +1148,7 @@ export default {
           // Fetch from origin using routed URL if A/B testing is active
           // In a real scenario, you would fetch from origin here
           let originResponse = null;
-          if (shouldTest && routingInfo && routingInfo.routedOrigin !== routingInfo.originalOrigin) {
+          if (testInfo && routingInfo && routingInfo.routedOrigin !== routingInfo.originalOrigin) {
             // Different origin - fetch from variant origin
             console.log(`Fetching from variant origin: ${routingUrl.href}`);
             // Uncomment when ready to fetch from origin:
@@ -756,7 +1157,7 @@ export default {
             //   headers: request.headers,
             // });
             // originResponse = await fetch(originRequest);
-          } else if (shouldTest && routingInfo) {
+          } else if (testInfo && routingInfo) {
             // Same origin, different path - fetch from routed path
             console.log(`Fetching from routed path: ${routingUrl.pathname}`);
             // Uncomment when ready to fetch from origin:
@@ -776,19 +1177,26 @@ export default {
           const responseHeaders = new Headers({
             'Content-Type': contentType,
             'X-Request-Method': method,
-            'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
-          // Add routing info header if routing occurred
-          if (routingInfo) {
-            responseHeaders.set('X-AB-Test-Routed', 'true');
-            responseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
-            responseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+          // Add test info headers if A/B testing is active
+          if (testInfo) {
+            responseHeaders.set('X-AB-Test-Id', testInfo.testId);
+            responseHeaders.set('X-AB-Test-Name', testInfo.testName);
+            responseHeaders.set('X-AB-Test-Variant', testInfo.variant);
+            
+            // Add routing info header if routing occurred
+            if (routingInfo) {
+              responseHeaders.set('X-AB-Test-Routed', 'true');
+              responseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
+              responseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+              responseHeaders.set('X-AB-Test-Strategy', routingInfo.strategy);
+            }
           }
           
           // Apply cache headers (respects origin headers if available)
           // Use routed pathname for cache TTL calculation
-          const pathnameForCache = shouldTest ? routingUrl.pathname : url.pathname;
+          const pathnameForCache = testInfo && testInfo.routed ? routingUrl.pathname : url.pathname;
           applyCacheHeaders(originResponse, pathnameForCache, responseHeaders);
           
           const ttlSeconds = getCacheTTL(pathnameForCache);
@@ -803,9 +1211,9 @@ export default {
             headers: responseHeaders,
           });
           
-          // Set variant cookie if this is a new assignment
-          if (isNewAssignment) {
-            response = setVariantCookie(response, variant);
+          // Set test variant cookie if this is a new assignment
+          if (testInfo && testInfo.isNewAssignment) {
+            response = setTestVariantCookie(response, testInfo.testId, testInfo.variant);
           }
           
           // Check for conditional request before caching
@@ -813,8 +1221,8 @@ export default {
           if (conditionalCheck) {
             console.log('Conditional request validated - returning 304 Not Modified');
             // Still set cookie on 304 responses if needed
-            if (isNewAssignment) {
-              return setVariantCookie(conditionalCheck, variant);
+            if (testInfo && testInfo.isNewAssignment) {
+              return setTestVariantCookie(conditionalCheck, testInfo.testId, testInfo.variant);
             }
             return conditionalCheck;
           }
@@ -837,73 +1245,91 @@ export default {
             console.warn('Could not read request body:', e.message);
           }
 
-          let postResponse = new Response("Hello from SmartCDN - POST request received", {
-            status: 201,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "X-AB-Test-Variant": variant,
-              "Cache-Control": "no-cache, no-store, must-revalidate",
-              "Pragma": "no-cache",
-              "Expires": "0",
-            },
+          const postHeaders = new Headers({
+            "Content-Type": "text/plain",
+            "X-Request-Method": method,
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
           });
           
-          // Set variant cookie if this is a new assignment
-          if (isNewAssignment) {
-            postResponse = setVariantCookie(postResponse, variant);
+          if (testInfo) {
+            postHeaders.set("X-AB-Test-Id", testInfo.testId);
+            postHeaders.set("X-AB-Test-Variant", testInfo.variant);
+          }
+
+          let postResponse = new Response("Hello from SmartCDN - POST request received", {
+            status: 201,
+            headers: postHeaders,
+          });
+          
+          // Set test variant cookie if this is a new assignment
+          if (testInfo && testInfo.isNewAssignment) {
+            postResponse = setTestVariantCookie(postResponse, testInfo.testId, testInfo.variant);
           }
           
           return postResponse;
 
         case 'PUT':
+          const putHeaders = new Headers({
+            "Content-Type": "text/plain",
+            "X-Request-Method": method,
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+          });
+          if (testInfo) {
+            putHeaders.set("X-AB-Test-Id", testInfo.testId);
+            putHeaders.set("X-AB-Test-Variant", testInfo.variant);
+          }
           let putResponse = new Response("Hello from SmartCDN - PUT request received", {
             status: 200,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "X-AB-Test-Variant": variant,
-              "Cache-Control": "no-cache, no-store, must-revalidate",
-              "Pragma": "no-cache",
-              "Expires": "0",
-            },
+            headers: putHeaders,
           });
-          if (isNewAssignment) {
-            putResponse = setVariantCookie(putResponse, variant);
+          if (testInfo && testInfo.isNewAssignment) {
+            putResponse = setTestVariantCookie(putResponse, testInfo.testId, testInfo.variant);
           }
           return putResponse;
 
         case 'DELETE':
+          const deleteHeaders = new Headers({
+            "Content-Type": "text/plain",
+            "X-Request-Method": method,
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+          });
+          if (testInfo) {
+            deleteHeaders.set("X-AB-Test-Id", testInfo.testId);
+            deleteHeaders.set("X-AB-Test-Variant", testInfo.variant);
+          }
           let deleteResponse = new Response("Hello from SmartCDN - DELETE request received", {
             status: 200,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "X-AB-Test-Variant": variant,
-              "Cache-Control": "no-cache, no-store, must-revalidate",
-              "Pragma": "no-cache",
-              "Expires": "0",
-            },
+            headers: deleteHeaders,
           });
-          if (isNewAssignment) {
-            deleteResponse = setVariantCookie(deleteResponse, variant);
+          if (testInfo && testInfo.isNewAssignment) {
+            deleteResponse = setTestVariantCookie(deleteResponse, testInfo.testId, testInfo.variant);
           }
           return deleteResponse;
 
         case 'PATCH':
+          const patchHeaders = new Headers({
+            "Content-Type": "text/plain",
+            "X-Request-Method": method,
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+          });
+          if (testInfo) {
+            patchHeaders.set("X-AB-Test-Id", testInfo.testId);
+            patchHeaders.set("X-AB-Test-Variant", testInfo.variant);
+          }
           let patchResponse = new Response("Hello from SmartCDN - PATCH request received", {
             status: 200,
-            headers: { 
-              "Content-Type": "text/plain",
-              "X-Request-Method": method,
-              "X-AB-Test-Variant": variant,
-              "Cache-Control": "no-cache, no-store, must-revalidate",
-              "Pragma": "no-cache",
-              "Expires": "0",
-            },
+            headers: patchHeaders,
           });
-          if (isNewAssignment) {
-            patchResponse = setVariantCookie(patchResponse, variant);
+          if (testInfo && testInfo.isNewAssignment) {
+            patchResponse = setTestVariantCookie(patchResponse, testInfo.testId, testInfo.variant);
           }
           return patchResponse;
 
@@ -922,13 +1348,14 @@ export default {
           // Generate custom cache key for HEAD requests too
           // Use routed URL if A/B testing is active
           const headCache = caches.default;
-          const headCacheKeyUrl = shouldTest ? routingUrl : url;
+          const headCacheKeyUrl = testInfo && testInfo.routed ? routingUrl : url;
           let headCacheKey = generateCacheKey(request, headCacheKeyUrl);
           
-          // Add variant to cache key if testing is enabled
-          if (shouldTest) {
+          // Add test ID and variant to cache key if testing is active
+          if (testInfo) {
             const headVariantCacheKeyUrl = new URL(headCacheKey.url);
-            headVariantCacheKeyUrl.searchParams.set('_variant', variant);
+            headVariantCacheKeyUrl.searchParams.set('_test', testInfo.testId);
+            headVariantCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
             headCacheKey = new Request(headVariantCacheKeyUrl.toString(), {
               method: request.method,
               headers: request.headers,
@@ -947,18 +1374,22 @@ export default {
           if (cachedHeadResponse) {
             console.log('Cache HIT (HEAD) for:', url.pathname);
             
-            // Add variant header to cached response
-            const cachedHeadResponseWithVariant = new Response(null, {
+            // Add test info headers to cached response
+            const cachedHeadResponseWithTest = new Response(null, {
               status: cachedHeadResponse.status,
               statusText: cachedHeadResponse.statusText,
               headers: cachedHeadResponse.headers,
             });
-            cachedHeadResponseWithVariant.headers.set('X-AB-Test-Variant', variant);
+            
+            if (testInfo) {
+              cachedHeadResponseWithTest.headers.set('X-AB-Test-Id', testInfo.testId);
+              cachedHeadResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
+            }
             
             // Set cookie if this is a new assignment
-            let finalCachedHeadResponse = cachedHeadResponseWithVariant;
-            if (isNewAssignment) {
-              finalCachedHeadResponse = setVariantCookie(cachedHeadResponseWithVariant, variant);
+            let finalCachedHeadResponse = cachedHeadResponseWithTest;
+            if (testInfo && testInfo.isNewAssignment) {
+              finalCachedHeadResponse = setTestVariantCookie(cachedHeadResponseWithTest, testInfo.testId, testInfo.variant);
             }
             
             // Check for conditional request
@@ -966,8 +1397,8 @@ export default {
             if (headConditionalResponse) {
               console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
               // Still set cookie on 304 responses if needed
-              if (isNewAssignment) {
-                return setVariantCookie(headConditionalResponse, variant);
+              if (testInfo && testInfo.isNewAssignment) {
+                return setTestVariantCookie(headConditionalResponse, testInfo.testId, testInfo.variant);
               }
               return headConditionalResponse;
             }
@@ -979,7 +1410,7 @@ export default {
           
           // Fetch from origin using routed URL if A/B testing is active
           let headOriginResponse = null;
-          if (shouldTest && routingInfo) {
+          if (testInfo && routingInfo) {
             console.log(`Fetching from routed path (HEAD): ${routingUrl.pathname}`);
             // Uncomment when ready to fetch from origin:
             // const headOriginRequest = new Request(routingUrl.href, {
@@ -996,18 +1427,25 @@ export default {
           const headResponseHeaders = new Headers({
             'Content-Type': headContentType,
             'X-Request-Method': method,
-            'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
-          // Add routing info header if routing occurred
-          if (routingInfo) {
-            headResponseHeaders.set('X-AB-Test-Routed', 'true');
-            headResponseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
-            headResponseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+          // Add test info headers if A/B testing is active
+          if (testInfo) {
+            headResponseHeaders.set('X-AB-Test-Id', testInfo.testId);
+            headResponseHeaders.set('X-AB-Test-Name', testInfo.testName);
+            headResponseHeaders.set('X-AB-Test-Variant', testInfo.variant);
+            
+            // Add routing info header if routing occurred
+            if (routingInfo) {
+              headResponseHeaders.set('X-AB-Test-Routed', 'true');
+              headResponseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
+              headResponseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+              headResponseHeaders.set('X-AB-Test-Strategy', routingInfo.strategy);
+            }
           }
           
           // Apply cache headers (use routed pathname for cache TTL)
-          const headPathnameForCache = shouldTest ? routingUrl.pathname : url.pathname;
+          const headPathnameForCache = testInfo && testInfo.routed ? routingUrl.pathname : url.pathname;
           applyCacheHeaders(headOriginResponse, headPathnameForCache, headResponseHeaders);
           
           const headTtlSeconds = getCacheTTL(headPathnameForCache);
@@ -1018,9 +1456,9 @@ export default {
             headers: headResponseHeaders,
           });
           
-          // Set variant cookie if this is a new assignment
-          if (isNewAssignment) {
-            headResponse = setVariantCookie(headResponse, variant);
+          // Set test variant cookie if this is a new assignment
+          if (testInfo && testInfo.isNewAssignment) {
+            headResponse = setTestVariantCookie(headResponse, testInfo.testId, testInfo.variant);
           }
           
           // Check for conditional request
@@ -1028,8 +1466,8 @@ export default {
           if (headConditionalCheck) {
             console.log('Conditional request validated (HEAD) - returning 304 Not Modified');
             // Still set cookie on 304 responses if needed
-            if (isNewAssignment) {
-              return setVariantCookie(headConditionalCheck, variant);
+            if (testInfo && testInfo.isNewAssignment) {
+              return setTestVariantCookie(headConditionalCheck, testInfo.testId, testInfo.variant);
             }
             return headConditionalCheck;
           }
