@@ -105,6 +105,27 @@ export function addGeoRoutingHeaders(headers, geoRoutingInfo) {
 }
 
 /**
+ * Adds region-specific content information headers to response
+ * @param {Headers} headers - Response headers to modify
+ * @param {Object} regionContentInfo - Region-specific content information object
+ */
+export function addRegionContentHeaders(headers, regionContentInfo) {
+  if (!regionContentInfo || !regionContentInfo.enabled) {
+    return;
+  }
+
+  headers.set('X-Region-Content-Enabled', 'true');
+  headers.set('X-Region-Content-Mapping-Id', regionContentInfo.mappingId);
+  headers.set('X-Region-Content-Mapping-Name', regionContentInfo.mappingName);
+  headers.set('X-Region-Content-Original-Path', regionContentInfo.originalPath);
+  headers.set('X-Region-Content-Served-Path', regionContentInfo.contentPath);
+  if (regionContentInfo.country) {
+    headers.set('X-Region-Content-Country', regionContentInfo.country);
+  }
+  headers.set('X-Region-Content-Region', regionContentInfo.region);
+}
+
+/**
  * Gets Content-Type for negotiated format
  * @param {string} pathname - Request pathname
  * @param {Object} formatNegotiation - Format negotiation result (optional)
