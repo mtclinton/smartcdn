@@ -820,6 +820,164 @@ function getClientIP(request) {
 }
 
 /**
+ * Detects device type from User-Agent header
+ * @param {Request} request - The incoming request
+ * @returns {Object} Object with deviceType ('mobile', 'tablet', 'desktop') and details
+ */
+function detectDevice(request) {
+  const userAgent = request.headers.get('User-Agent') || '';
+  const ua = userAgent.toLowerCase();
+  
+  // Check for mobile device patterns
+  const mobilePatterns = [
+    /android.*mobile/,
+    /iphone/,
+    /ipod/,
+    /blackberry/,
+    /windows phone/,
+    /opera mini/,
+    /mobile/,
+    /webos/,
+    /palm/,
+    /fennec/,
+    /maemo/,
+    /symbian/,
+    /symbos/,
+    /series60/,
+    /series40/,
+    /smartphone/,
+  ];
+  
+  // Check for tablet patterns
+  const tabletPatterns = [
+    /ipad/,
+    /android(?!.*mobile)/,
+    /tablet/,
+    /playbook/,
+    /kindle/,
+    /silk/,
+    /gt-p/,
+    /gt-n/,
+    /sm-t/,
+    /nexus.*tablet/,
+    /windows.*touch/,
+    /touchpad/,
+    /hp-tablet/,
+    /kindle fire/,
+    /playbook/,
+    /bb10.*touch/,
+  ];
+  
+  // Check for desktop patterns (more specific)
+  const desktopPatterns = [
+    /windows nt/,
+    /macintosh/,
+    /mac os x/,
+    /linux/,
+    /x11/,
+    /unix/,
+    /freebsd/,
+    /openbsd/,
+    /netbsd/,
+  ];
+  
+  // Check for tablet first (tablets often match mobile patterns too)
+  for (const pattern of tabletPatterns) {
+    if (pattern.test(ua)) {
+      return {
+        deviceType: 'tablet',
+        userAgent: userAgent,
+        isMobile: false,
+        isTablet: true,
+        isDesktop: false,
+      };
+    }
+  }
+  
+  // Check for mobile devices
+  for (const pattern of mobilePatterns) {
+    if (pattern.test(ua)) {
+      return {
+        deviceType: 'mobile',
+        userAgent: userAgent,
+        isMobile: true,
+        isTablet: false,
+        isDesktop: false,
+      };
+    }
+  }
+  
+  // Check for desktop (if it matches desktop patterns and not mobile/tablet)
+  let isDesktop = false;
+  for (const pattern of desktopPatterns) {
+    if (pattern.test(ua)) {
+      isDesktop = true;
+      break;
+    }
+  }
+  
+  // Default to desktop if no mobile/tablet patterns matched
+  // or if desktop patterns are present
+  if (isDesktop || (!ua.includes('mobile') && !ua.includes('tablet'))) {
+    return {
+      deviceType: 'desktop',
+      userAgent: userAgent,
+      isMobile: false,
+      isTablet: false,
+      isDesktop: true,
+    };
+  }
+  
+  // Fallback to desktop if uncertain
+  return {
+    deviceType: 'desktop',
+    userAgent: userAgent,
+    isMobile: false,
+    isTablet: false,
+    isDesktop: true,
+  };
+}
+
+/**
+ * Gets device-specific image optimization parameters
+ * @param {Object} deviceInfo - Device information from detectDevice()
+ * @returns {Object} Image optimization parameters (width, quality, format suggestions)
+ */
+function getImageOptimizationParams(deviceInfo) {
+  const { deviceType, isMobile, isTablet } = deviceInfo;
+  
+  // Default optimization parameters
+  const params = {
+    deviceType,
+    // Suggested max width based on device type
+    maxWidth: 1920,
+    // Suggested quality (0-100)
+    quality: 85,
+    // Preferred format
+    preferredFormat: 'webp',
+    // DPR (Device Pixel Ratio) hint
+    dpr: 1,
+  };
+  
+  if (isMobile) {
+    params.maxWidth = 768;
+    params.quality = 80;
+    params.dpr = 2; // Most mobile devices are high-DPI
+  } else if (isTablet) {
+    params.maxWidth = 1024;
+    params.quality = 82;
+    params.dpr = 2;
+  } else {
+    // Desktop
+    params.maxWidth = 1920;
+    params.quality = 85;
+    params.dpr = 1;
+  }
+  
+  return params;
+}
+
+/**
  * Hashes a string to a number for consistent variant assignment
  * @param {string} input - The string to hash
  * @returns {number} A hash value between 0 and 100
@@ -1024,6 +1182,10 @@ export default {
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
 
+      // Detect device type from User-Agent
+      const deviceInfo = detectDevice(request);
+      const imageOptParams = getImageOptimizationParams(deviceInfo);
+
       // Get primary A/B test for this path (highest priority)
       const primaryTest = getPrimaryTest(url.pathname);
       let testInfo = null;
@@ -1067,6 +1229,10 @@ export default {
       console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
       console.log('Request URL:', url.href);
       console.log('Request Method:', method);
+      console.log('Device Type:', deviceInfo.deviceType, `(Mobile: ${deviceInfo.isMobile}, Tablet: ${deviceInfo.isTablet}, Desktop: ${deviceInfo.isDesktop})`);
+      if (isImagePath(url.pathname)) {
+        console.log('Image Optimization Params:', JSON.stringify(imageOptParams, null, 2));
+      }
       if (testInfo) {
         console.log('A/B Test:', testInfo.testName, `(${testInfo.testId})`);
         console.log('A/B Test Variant:', testInfo.variant);
@@ -1111,16 +1277,30 @@ export default {
           if (cachedResponse) {
             console.log('Cache HIT for:', url.pathname);
             
-            // Add test info headers to cached response
+            // Add test info and device headers to cached response
             const cachedResponseWithTest = new Response(cachedResponse.body, {
               status: cachedResponse.status,
               statusText: cachedResponse.statusText,
               headers: cachedResponse.headers,
             });
             
+            // Add device information headers
+            cachedResponseWithTest.headers.set('X-Device-Type', deviceInfo.deviceType);
+            cachedResponseWithTest.headers.set('X-Device-Is-Mobile', deviceInfo.isMobile.toString());
+            cachedResponseWithTest.headers.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
+            cachedResponseWithTest.headers.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
+            
             if (testInfo) {
               cachedResponseWithTest.headers.set('X-AB-Test-Id', testInfo.testId);
               cachedResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
+            }
+            
+            // Add image optimization hints for image requests
+            if (isImagePath(url.pathname)) {
+              cachedResponseWithTest.headers.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
+              cachedResponseWithTest.headers.set('X-Image-Quality', imageOptParams.quality.toString());
+              cachedResponseWithTest.headers.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
+              cachedResponseWithTest.headers.set('X-Image-DPR', imageOptParams.dpr.toString());
             }
             
             // Set cookie if this is a new assignment (cookie might have been cleared)
@@ -1178,6 +1358,20 @@ export default {
             'Content-Type': contentType,
             'X-Request-Method': method,
           });
+          
+          // Add device information headers
+          responseHeaders.set('X-Device-Type', deviceInfo.deviceType);
+          responseHeaders.set('X-Device-Is-Mobile', deviceInfo.isMobile.toString());
+          responseHeaders.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
+          responseHeaders.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
+          
+          // Add image optimization hints for image requests
+          if (isImagePath(url.pathname)) {
+            responseHeaders.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
+            responseHeaders.set('X-Image-Quality', imageOptParams.quality.toString());
+            responseHeaders.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
+            responseHeaders.set('X-Image-DPR', imageOptParams.dpr.toString());
+          }
           
           // Add test info headers if A/B testing is active
           if (testInfo) {
@@ -1251,6 +1445,10 @@ export default {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Device-Type": deviceInfo.deviceType,
+            "X-Device-Is-Mobile": deviceInfo.isMobile.toString(),
+            "X-Device-Is-Tablet": deviceInfo.isTablet.toString(),
+            "X-Device-Is-Desktop": deviceInfo.isDesktop.toString(),
           });
           
           if (testInfo) {
@@ -1277,6 +1475,10 @@ export default {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Device-Type": deviceInfo.deviceType,
+            "X-Device-Is-Mobile": deviceInfo.isMobile.toString(),
+            "X-Device-Is-Tablet": deviceInfo.isTablet.toString(),
+            "X-Device-Is-Desktop": deviceInfo.isDesktop.toString(),
           });
           if (testInfo) {
             putHeaders.set("X-AB-Test-Id", testInfo.testId);
@@ -1298,6 +1500,10 @@ export default {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Device-Type": deviceInfo.deviceType,
+            "X-Device-Is-Mobile": deviceInfo.isMobile.toString(),
+            "X-Device-Is-Tablet": deviceInfo.isTablet.toString(),
+            "X-Device-Is-Desktop": deviceInfo.isDesktop.toString(),
           });
           if (testInfo) {
             deleteHeaders.set("X-AB-Test-Id", testInfo.testId);
@@ -1319,6 +1525,10 @@ export default {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Device-Type": deviceInfo.deviceType,
+            "X-Device-Is-Mobile": deviceInfo.isMobile.toString(),
+            "X-Device-Is-Tablet": deviceInfo.isTablet.toString(),
+            "X-Device-Is-Desktop": deviceInfo.isDesktop.toString(),
           });
           if (testInfo) {
             patchHeaders.set("X-AB-Test-Id", testInfo.testId);
@@ -1374,16 +1584,30 @@ export default {
           if (cachedHeadResponse) {
             console.log('Cache HIT (HEAD) for:', url.pathname);
             
-            // Add test info headers to cached response
+            // Add test info and device headers to cached response
             const cachedHeadResponseWithTest = new Response(null, {
               status: cachedHeadResponse.status,
               statusText: cachedHeadResponse.statusText,
               headers: cachedHeadResponse.headers,
             });
             
+            // Add device information headers
+            cachedHeadResponseWithTest.headers.set('X-Device-Type', deviceInfo.deviceType);
+            cachedHeadResponseWithTest.headers.set('X-Device-Is-Mobile', deviceInfo.isMobile.toString());
+            cachedHeadResponseWithTest.headers.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
+            cachedHeadResponseWithTest.headers.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
+            
             if (testInfo) {
               cachedHeadResponseWithTest.headers.set('X-AB-Test-Id', testInfo.testId);
               cachedHeadResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
+            }
+            
+            // Add image optimization hints for image requests
+            if (isImagePath(url.pathname)) {
+              cachedHeadResponseWithTest.headers.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
+              cachedHeadResponseWithTest.headers.set('X-Image-Quality', imageOptParams.quality.toString());
+              cachedHeadResponseWithTest.headers.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
+              cachedHeadResponseWithTest.headers.set('X-Image-DPR', imageOptParams.dpr.toString());
             }
             
             // Set cookie if this is a new assignment
@@ -1428,6 +1652,20 @@ export default {
             'Content-Type': headContentType,
             'X-Request-Method': method,
           });
+          
+          // Add device information headers
+          headResponseHeaders.set('X-Device-Type', deviceInfo.deviceType);
+          headResponseHeaders.set('X-Device-Is-Mobile', deviceInfo.isMobile.toString());
+          headResponseHeaders.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
+          headResponseHeaders.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
+          
+          // Add image optimization hints for image requests
+          if (isImagePath(url.pathname)) {
+            headResponseHeaders.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
+            headResponseHeaders.set('X-Image-Quality', imageOptParams.quality.toString());
+            headResponseHeaders.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
+            headResponseHeaders.set('X-Image-DPR', imageOptParams.dpr.toString());
+          }
           
           // Add test info headers if A/B testing is active
           if (testInfo) {
