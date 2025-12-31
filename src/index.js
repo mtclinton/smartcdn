@@ -978,6 +978,166 @@ function getImageOptimizationParams(deviceInfo) {
 }
 
 /**
+ * Parses the Accept header to determine supported image formats
+ * @param {Request} request - The incoming request
+ * @returns {Object} Object with supported formats and their quality values
+ */
+function parseAcceptHeader(request) {
+  const acceptHeader = request.headers.get('Accept') || '';
+  const supportedFormats = {
+    avif: false,
+    webp: false,
+    jpeg: false,
+    jpg: false,
+    png: false,
+    gif: false,
+    svg: false,
+  };
+  
+  // Parse Accept header (format: "image/avif,image/webp,image/*;q=0.8")
+  const parts = acceptHeader.split(',');
+  const formatQuality = {};
+  
+  for (const part of parts) {
+    const trimmed = part.trim();
+    const [mimeType, qualityStr] = trimmed.split(';');
+    const quality = qualityStr ? parseFloat(qualityStr.replace('q=', '')) : 1.0;
+    
+    if (mimeType) {
+      const normalized = mimeType.trim().toLowerCase();
+      
+      // Map MIME types to format names
+      if (normalized.includes('image/avif') || normalized.includes('avif')) {
+        supportedFormats.avif = true;
+        formatQuality.avif = quality;
+      } else if (normalized.includes('image/webp') || normalized.includes('webp')) {
+        supportedFormats.webp = true;
+        formatQuality.webp = quality;
+      } else if (normalized.includes('image/jpeg') || normalized.includes('image/jpg')) {
+        supportedFormats.jpeg = true;
+        supportedFormats.jpg = true;
+        formatQuality.jpeg = quality;
+        formatQuality.jpg = quality;
+      } else if (normalized.includes('image/png')) {
+        supportedFormats.png = true;
+        formatQuality.png = quality;
+      } else if (normalized.includes('image/gif')) {
+        supportedFormats.gif = true;
+        formatQuality.gif = quality;
+      } else if (normalized.includes('image/svg')) {
+        supportedFormats.svg = true;
+        formatQuality.svg = quality;
+      } else if (normalized.includes('image/*')) {
+        // Wildcard - supports all image formats
+        Object.keys(supportedFormats).forEach(format => {
+          if (!supportedFormats[format]) {
+            supportedFormats[format] = true;
+            formatQuality[format] = quality;
+          }
+        });
+      }
+    }
+  }
+  
+  return {
+    supportedFormats,
+    formatQuality,
+    rawAccept: acceptHeader,
+  };
+}
+
+/**
+ * Determines the best image format to serve based on browser support and original format
+ * Priority: AVIF > WebP > Original format
+ * @param {string} originalPath - The original image path
+ * @param {Object} acceptInfo - Parsed Accept header information
+ * @returns {Object} Object with bestFormat, shouldTransform, and transformedPath
+ */
+function negotiateImageFormat(originalPath, acceptInfo) {
+  const { supportedFormats, formatQuality } = acceptInfo;
+  
+  // Get original file extension
+  const lastDot = originalPath.lastIndexOf('.');
+  if (lastDot === -1) {
+    return {
+      bestFormat: null,
+      shouldTransform: false,
+      transformedPath: originalPath,
+      originalFormat: null,
+    };
+  }
+  
+  const extension = originalPath.substring(lastDot + 1).toLowerCase();
+  const originalFormat = extension;
+  
+  // Only negotiate for JPEG and PNG (common formats that can be optimized)
+  const optimizableFormats = ['jpg', 'jpeg', 'png'];
+  if (!optimizableFormats.includes(extension)) {
+    return {
+      bestFormat: extension,
+      shouldTransform: false,
+      transformedPath: originalPath,
+      originalFormat,
+    };
+  }
+  
+  // Priority order: AVIF > WebP > Original
+  // Check AVIF support (best compression)
+  if (supportedFormats.avif && formatQuality.avif > 0) {
+    const newPath = originalPath.substring(0, lastDot) + '.avif';
+    return {
+      bestFormat: 'avif',
+      shouldTransform: true,
+      transformedPath: newPath,
+      originalFormat,
+      quality: formatQuality.avif,
+    };
+  }
+  
+  // Check WebP support (good compression, wider support)
+  if (supportedFormats.webp && formatQuality.webp > 0) {
+    const newPath = originalPath.substring(0, lastDot) + '.webp';
+    return {
+      bestFormat: 'webp',
+      shouldTransform: true,
+      transformedPath: newPath,
+      originalFormat,
+      quality: formatQuality.webp,
+    };
+  }
+  
+  // Fallback to original format
+  return {
+    bestFormat: extension,
+    shouldTransform: false,
+    transformedPath: originalPath,
+    originalFormat,
+  };
+}
+
+/**
+ * Transforms an image URL to request optimized format from origin
+ * @param {URL} url - The original URL
+ * @param {Object} formatNegotiation - Format negotiation result from negotiateImageFormat
+ * @returns {URL} The transformed URL with optimized format
+ */
+function transformImageUrlForFormat(url, formatNegotiation) {
+  if (!formatNegotiation.shouldTransform) {
+    return url;
+  }
+  
+  const newUrl = new URL(url);
+  newUrl.pathname = formatNegotiation.transformedPath;
+  
+  // Optionally add format hint as query parameter for origin to know we want this format
+  // This can be useful if origin needs to transform on-the-fly
+  newUrl.searchParams.set('_format', formatNegotiation.bestFormat);
+  newUrl.searchParams.set('_from', formatNegotiation.originalFormat);
+  
+  return newUrl;
+}
+
+/**
  * Hashes a string to a number for consistent variant assignment
  * @param {string} input - The string to hash
  * @returns {number} A hash value between 0 and 100
@@ -1186,6 +1346,23 @@ export default {
       const deviceInfo = detectDevice(request);
       const imageOptParams = getImageOptimizationParams(deviceInfo);
 
+      // Content negotiation for images
+      let formatNegotiation = null;
+      let imageUrl = url;
+      if (isImagePath(url.pathname)) {
+        const acceptInfo = parseAcceptHeader(request);
+        formatNegotiation = negotiateImageFormat(url.pathname, acceptInfo);
+        
+        if (formatNegotiation.shouldTransform) {
+          // Transform URL to request optimized format
+          imageUrl = transformImageUrlForFormat(url, formatNegotiation);
+          console.log(`Content Negotiation: ${formatNegotiation.originalFormat} -> ${formatNegotiation.bestFormat}`);
+          console.log(`Transformed Image URL: ${imageUrl.pathname}`);
+        } else {
+          console.log(`Content Negotiation: Using original format (${formatNegotiation.originalFormat})`);
+        }
+      }
+
       // Get primary A/B test for this path (highest priority)
       const primaryTest = getPrimaryTest(url.pathname);
       let testInfo = null;
@@ -1248,22 +1425,43 @@ export default {
       switch (method) {
         case 'GET':
           // Generate custom cache key (normalizes query params)
-          // Use routed URL if A/B testing is active
+          // Combine A/B test routing with format negotiation
           const cache = caches.default;
-          const cacheKeyUrl = testInfo && testInfo.routed ? routingUrl : url;
+          let finalUrl = url;
+          
+          // Apply format negotiation first (if image)
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            finalUrl = imageUrl;
+          }
+          
+          // Then apply A/B test routing
+          if (testInfo && testInfo.routed) {
+            // Combine format negotiation with A/B test routing
+            const combinedUrl = new URL(finalUrl);
+            combinedUrl.pathname = routingUrl.pathname;
+            if (routingUrl.origin !== url.origin) {
+              combinedUrl.origin = routingUrl.origin;
+            }
+            finalUrl = combinedUrl;
+          }
+          
+          const cacheKeyUrl = finalUrl;
           let cacheKey = generateCacheKey(request, cacheKeyUrl);
           
-          // Add test ID and variant to cache key if testing is active
-          // This ensures different variants are cached separately
+          // Add test ID, variant, and format to cache key
+          // This ensures different variants and formats are cached separately
+          const enhancedCacheKeyUrl = new URL(cacheKey.url);
           if (testInfo) {
-            const variantCacheKeyUrl = new URL(cacheKey.url);
-            variantCacheKeyUrl.searchParams.set('_test', testInfo.testId);
-            variantCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
-            cacheKey = new Request(variantCacheKeyUrl.toString(), {
-              method: request.method,
-              headers: request.headers,
-            });
+            enhancedCacheKeyUrl.searchParams.set('_test', testInfo.testId);
+            enhancedCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
           }
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            enhancedCacheKeyUrl.searchParams.set('_format', formatNegotiation.bestFormat);
+          }
+          cacheKey = new Request(enhancedCacheKeyUrl.toString(), {
+            method: request.method,
+            headers: request.headers,
+          });
           
           // Log cache key info
           const originalQuery = url.search;
@@ -1295,12 +1493,18 @@ export default {
               cachedResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
             }
             
-            // Add image optimization hints for image requests
+            // Add image optimization hints and format negotiation info for image requests
             if (isImagePath(url.pathname)) {
               cachedResponseWithTest.headers.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
               cachedResponseWithTest.headers.set('X-Image-Quality', imageOptParams.quality.toString());
               cachedResponseWithTest.headers.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
               cachedResponseWithTest.headers.set('X-Image-DPR', imageOptParams.dpr.toString());
+              
+              if (formatNegotiation) {
+                cachedResponseWithTest.headers.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
+                cachedResponseWithTest.headers.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
+                cachedResponseWithTest.headers.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+              }
             }
             
             // Set cookie if this is a new assignment (cookie might have been cleared)
@@ -1325,33 +1529,42 @@ export default {
           
           console.log('Cache MISS for:', url.pathname);
           
-          // Fetch from origin using routed URL if A/B testing is active
+          // Fetch from origin using final URL (combines A/B test routing + format negotiation)
           // In a real scenario, you would fetch from origin here
           let originResponse = null;
-          if (testInfo && routingInfo && routingInfo.routedOrigin !== routingInfo.originalOrigin) {
-            // Different origin - fetch from variant origin
-            console.log(`Fetching from variant origin: ${routingUrl.href}`);
+          if (finalUrl.href !== url.href) {
+            console.log(`Fetching from origin: ${finalUrl.href} (original: ${url.href})`);
+            if (formatNegotiation && formatNegotiation.shouldTransform) {
+              console.log(`Format negotiation: requesting ${formatNegotiation.bestFormat} format`);
+            }
             // Uncomment when ready to fetch from origin:
-            // const originRequest = new Request(routingUrl.href, {
-            //   method: request.method,
-            //   headers: request.headers,
-            // });
-            // originResponse = await fetch(originRequest);
-          } else if (testInfo && routingInfo) {
-            // Same origin, different path - fetch from routed path
-            console.log(`Fetching from routed path: ${routingUrl.pathname}`);
-            // Uncomment when ready to fetch from origin:
-            // const originRequest = new Request(routingUrl.href, {
+            // const originRequest = new Request(finalUrl.href, {
             //   method: request.method,
             //   headers: request.headers,
             // });
             // originResponse = await fetch(originRequest);
           }
           // For now, we'll create a response as if it came from origin
-          // Replace with: await fetch(routingUrl.href, request);
+          // Replace with: await fetch(finalUrl.href, request);
           
-          // Determine content type (use original pathname for content type detection)
-          const contentType = getContentType(url.pathname);
+          // Determine content type (use final URL pathname which may have format negotiation applied)
+          let contentType = getContentType(finalUrl.pathname);
+          
+          // Update Content-Type if format negotiation occurred
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            const formatMimeTypes = {
+              'avif': 'image/avif',
+              'webp': 'image/webp',
+              'jpg': 'image/jpeg',
+              'jpeg': 'image/jpeg',
+              'png': 'image/png',
+              'gif': 'image/gif',
+            };
+            const negotiatedMimeType = formatMimeTypes[formatNegotiation.bestFormat];
+            if (negotiatedMimeType) {
+              contentType = negotiatedMimeType;
+            }
+          }
           
           // Create response headers
           const responseHeaders = new Headers({
@@ -1365,12 +1578,18 @@ export default {
           responseHeaders.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
           responseHeaders.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
           
-          // Add image optimization hints for image requests
+          // Add image optimization hints and format negotiation info for image requests
           if (isImagePath(url.pathname)) {
             responseHeaders.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
             responseHeaders.set('X-Image-Quality', imageOptParams.quality.toString());
             responseHeaders.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
             responseHeaders.set('X-Image-DPR', imageOptParams.dpr.toString());
+            
+            if (formatNegotiation) {
+              responseHeaders.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
+              responseHeaders.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
+              responseHeaders.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+            }
           }
           
           // Add test info headers if A/B testing is active
@@ -1389,8 +1608,8 @@ export default {
           }
           
           // Apply cache headers (respects origin headers if available)
-          // Use routed pathname for cache TTL calculation
-          const pathnameForCache = testInfo && testInfo.routed ? routingUrl.pathname : url.pathname;
+          // Use final URL pathname for cache TTL calculation (includes format negotiation)
+          const pathnameForCache = finalUrl.pathname;
           applyCacheHeaders(originResponse, pathnameForCache, responseHeaders);
           
           const ttlSeconds = getCacheTTL(pathnameForCache);
@@ -1556,21 +1775,41 @@ export default {
 
         case 'HEAD':
           // Generate custom cache key for HEAD requests too
-          // Use routed URL if A/B testing is active
+          // Combine A/B test routing with format negotiation
           const headCache = caches.default;
-          const headCacheKeyUrl = testInfo && testInfo.routed ? routingUrl : url;
+          let headFinalUrl = url;
+          
+          // Apply format negotiation first (if image)
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            headFinalUrl = imageUrl;
+          }
+          
+          // Then apply A/B test routing
+          if (testInfo && testInfo.routed) {
+            const headCombinedUrl = new URL(headFinalUrl);
+            headCombinedUrl.pathname = routingUrl.pathname;
+            if (routingUrl.origin !== url.origin) {
+              headCombinedUrl.origin = routingUrl.origin;
+            }
+            headFinalUrl = headCombinedUrl;
+          }
+          
+          const headCacheKeyUrl = headFinalUrl;
           let headCacheKey = generateCacheKey(request, headCacheKeyUrl);
           
-          // Add test ID and variant to cache key if testing is active
+          // Add test ID, variant, and format to cache key
+          const headEnhancedCacheKeyUrl = new URL(headCacheKey.url);
           if (testInfo) {
-            const headVariantCacheKeyUrl = new URL(headCacheKey.url);
-            headVariantCacheKeyUrl.searchParams.set('_test', testInfo.testId);
-            headVariantCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
-            headCacheKey = new Request(headVariantCacheKeyUrl.toString(), {
-              method: request.method,
-              headers: request.headers,
-            });
+            headEnhancedCacheKeyUrl.searchParams.set('_test', testInfo.testId);
+            headEnhancedCacheKeyUrl.searchParams.set('_variant', testInfo.variant);
           }
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            headEnhancedCacheKeyUrl.searchParams.set('_format', formatNegotiation.bestFormat);
+          }
+          headCacheKey = new Request(headEnhancedCacheKeyUrl.toString(), {
+            method: request.method,
+            headers: request.headers,
+          });
           
           // Log cache key info
           const headOriginalQuery = url.search;
@@ -1602,12 +1841,18 @@ export default {
               cachedHeadResponseWithTest.headers.set('X-AB-Test-Variant', testInfo.variant);
             }
             
-            // Add image optimization hints for image requests
+            // Add image optimization hints and format negotiation info for image requests
             if (isImagePath(url.pathname)) {
               cachedHeadResponseWithTest.headers.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
               cachedHeadResponseWithTest.headers.set('X-Image-Quality', imageOptParams.quality.toString());
               cachedHeadResponseWithTest.headers.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
               cachedHeadResponseWithTest.headers.set('X-Image-DPR', imageOptParams.dpr.toString());
+              
+              if (formatNegotiation) {
+                cachedHeadResponseWithTest.headers.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
+                cachedHeadResponseWithTest.headers.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
+                cachedHeadResponseWithTest.headers.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+              }
             }
             
             // Set cookie if this is a new assignment
@@ -1632,20 +1877,39 @@ export default {
           
           console.log('Cache MISS (HEAD) for:', url.pathname);
           
-          // Fetch from origin using routed URL if A/B testing is active
+          // Fetch from origin using final URL (combines A/B test routing + format negotiation)
           let headOriginResponse = null;
-          if (testInfo && routingInfo) {
-            console.log(`Fetching from routed path (HEAD): ${routingUrl.pathname}`);
+          if (headFinalUrl.href !== url.href) {
+            console.log(`Fetching from origin (HEAD): ${headFinalUrl.href} (original: ${url.href})`);
+            if (formatNegotiation && formatNegotiation.shouldTransform) {
+              console.log(`Format negotiation (HEAD): requesting ${formatNegotiation.bestFormat} format`);
+            }
             // Uncomment when ready to fetch from origin:
-            // const headOriginRequest = new Request(routingUrl.href, {
+            // const headOriginRequest = new Request(headFinalUrl.href, {
             //   method: request.method,
             //   headers: request.headers,
             // });
             // headOriginResponse = await fetch(headOriginRequest);
           }
           
-          // Determine content type (use original pathname)
-          const headContentType = getContentType(url.pathname);
+          // Determine content type (use final URL pathname which may have format negotiation applied)
+          let headContentType = getContentType(headFinalUrl.pathname);
+          
+          // Update Content-Type if format negotiation occurred
+          if (formatNegotiation && formatNegotiation.shouldTransform) {
+            const formatMimeTypes = {
+              'avif': 'image/avif',
+              'webp': 'image/webp',
+              'jpg': 'image/jpeg',
+              'jpeg': 'image/jpeg',
+              'png': 'image/png',
+              'gif': 'image/gif',
+            };
+            const negotiatedMimeType = formatMimeTypes[formatNegotiation.bestFormat];
+            if (negotiatedMimeType) {
+              headContentType = negotiatedMimeType;
+            }
+          }
           
           // Create response headers
           const headResponseHeaders = new Headers({
@@ -1659,12 +1923,18 @@ export default {
           headResponseHeaders.set('X-Device-Is-Tablet', deviceInfo.isTablet.toString());
           headResponseHeaders.set('X-Device-Is-Desktop', deviceInfo.isDesktop.toString());
           
-          // Add image optimization hints for image requests
+          // Add image optimization hints and format negotiation info for image requests
           if (isImagePath(url.pathname)) {
             headResponseHeaders.set('X-Image-Max-Width', imageOptParams.maxWidth.toString());
             headResponseHeaders.set('X-Image-Quality', imageOptParams.quality.toString());
             headResponseHeaders.set('X-Image-Preferred-Format', imageOptParams.preferredFormat);
             headResponseHeaders.set('X-Image-DPR', imageOptParams.dpr.toString());
+            
+            if (formatNegotiation) {
+              headResponseHeaders.set('X-Image-Original-Format', formatNegotiation.originalFormat || 'unknown');
+              headResponseHeaders.set('X-Image-Served-Format', formatNegotiation.bestFormat || 'unknown');
+              headResponseHeaders.set('X-Image-Format-Negotiated', formatNegotiation.shouldTransform ? 'true' : 'false');
+            }
           }
           
           // Add test info headers if A/B testing is active
@@ -1682,8 +1952,8 @@ export default {
             }
           }
           
-          // Apply cache headers (use routed pathname for cache TTL)
-          const headPathnameForCache = testInfo && testInfo.routed ? routingUrl.pathname : url.pathname;
+          // Apply cache headers (use final URL pathname for cache TTL, includes format negotiation)
+          const headPathnameForCache = headFinalUrl.pathname;
           applyCacheHeaders(headOriginResponse, headPathnameForCache, headResponseHeaders);
           
           const headTtlSeconds = getCacheTTL(headPathnameForCache);
