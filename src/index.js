@@ -1,4 +1,202 @@
 /**
+ * A/B Testing Configuration
+ * Configure which paths should be tested and routing behavior
+ */
+const AB_TEST_CONFIG = {
+  // Enable or disable A/B testing globally
+  enabled: true,
+  
+  // Paths to test (supports exact matches, prefixes, or regex patterns)
+  // Empty array means test all paths
+  testPaths: [
+    // Example: test all HTML pages
+    { pattern: /\.html?$/i, type: 'regex' },
+    // Example: test specific paths
+    { pattern: '/', type: 'exact' },
+    { pattern: '/index', type: 'exact' },
+    // Example: test paths with prefix
+    { pattern: '/products', type: 'prefix' },
+  ],
+  
+  // Paths to exclude from A/B testing (takes precedence over testPaths)
+  excludePaths: [
+    { pattern: /\.(css|js|jpg|jpeg|png|gif|webp|svg|ico|woff|woff2|ttf|otf)$/i, type: 'regex' },
+    { pattern: '/api/', type: 'prefix' },
+    { pattern: '/admin', type: 'prefix' },
+    { pattern: '/static', type: 'prefix' },
+  ],
+  
+  // Routing configuration for variant B
+  variantBRouting: {
+    // Strategy: 'path-suffix' or 'origin'
+    strategy: 'path-suffix',
+    
+    // For path-suffix strategy: suffix to add (e.g., '-v2')
+    pathSuffix: '-v2',
+    
+    // For origin strategy: alternative origin URL
+    // originUrl: 'https://v2.example.com',
+    
+    // File extensions to apply suffix to (empty = all)
+    // For path-suffix: if file has extension, insert before extension
+    // Example: /page.html -> /page-v2.html
+    applyToExtensions: ['html', 'htm', 'js', 'css'],
+  },
+};
+
+/**
+ * Checks if A/B testing is enabled
+ * @returns {boolean} True if A/B testing is enabled
+ */
+function isABTestingEnabled() {
+  return AB_TEST_CONFIG.enabled;
+}
+
+/**
+ * Checks if a path matches a pattern
+ * @param {string} pathname - The path to check
+ * @param {Object} patternConfig - Pattern configuration with 'pattern' and 'type'
+ * @returns {boolean} True if path matches
+ */
+function matchesPattern(pathname, patternConfig) {
+  const { pattern, type } = patternConfig;
+  
+  switch (type) {
+    case 'exact':
+      return pathname === pattern;
+    case 'prefix':
+      return pathname.startsWith(pattern);
+    case 'regex':
+      return pattern.test(pathname);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Checks if a path should be included in A/B testing
+ * @param {string} pathname - The request pathname
+ * @returns {boolean} True if path should be tested
+ */
+function shouldTestPath(pathname) {
+  // Check exclusions first (takes precedence)
+  for (const excludePattern of AB_TEST_CONFIG.excludePaths) {
+    if (matchesPattern(pathname, excludePattern)) {
+      return false;
+    }
+  }
+  
+  // If testPaths is empty, test all paths (except excluded)
+  if (AB_TEST_CONFIG.testPaths.length === 0) {
+    return true;
+  }
+  
+  // Check if path matches any test pattern
+  for (const testPattern of AB_TEST_CONFIG.testPaths) {
+    if (matchesPattern(pathname, testPattern)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Transforms a URL path based on variant B routing strategy
+ * @param {string} pathname - The original pathname
+ * @param {string} variant - The assigned variant ('A' or 'B')
+ * @returns {string} The transformed pathname (or original if variant A)
+ */
+function transformPathForVariant(pathname, variant) {
+  // Variant A: return original path
+  if (variant === 'A') {
+    return pathname;
+  }
+  
+  // Variant B: apply routing transformation
+  const routing = AB_TEST_CONFIG.variantBRouting;
+  
+  if (routing.strategy === 'path-suffix') {
+    const suffix = routing.pathSuffix || '-v2';
+    
+    // Check if path has a file extension
+    const lastDot = pathname.lastIndexOf('.');
+    const lastSlash = pathname.lastIndexOf('/');
+    
+    if (lastDot > lastSlash && lastDot !== -1) {
+      // Has file extension
+      const extension = pathname.substring(lastDot);
+      const basePath = pathname.substring(0, lastDot);
+      
+      // Check if we should apply suffix to this extension
+      const extWithoutDot = extension.substring(1).toLowerCase();
+      const applyToExtensions = routing.applyToExtensions || [];
+      
+      if (applyToExtensions.length === 0 || applyToExtensions.includes(extWithoutDot)) {
+        // Insert suffix before extension
+        return `${basePath}${suffix}${extension}`;
+      }
+    }
+    
+    // No extension or extension not in list, append suffix
+    return `${pathname}${suffix}`;
+  }
+  
+  // For 'origin' strategy, path transformation might not be needed
+  // (origin change is handled separately)
+  return pathname;
+}
+
+/**
+ * Gets the origin URL for variant B if origin strategy is used
+ * @param {string} originalUrl - The original request URL
+ * @param {string} variant - The assigned variant ('A' or 'B')
+ * @returns {string|null} The origin URL for variant B, or null if not applicable
+ */
+function getVariantOrigin(originalUrl, variant) {
+  if (variant === 'A') {
+    return null; // Use original origin
+  }
+  
+  const routing = AB_TEST_CONFIG.variantBRouting;
+  if (routing.strategy === 'origin' && routing.originUrl) {
+    return routing.originUrl;
+  }
+  
+  return null;
+}
+
+/**
+ * Transforms a request URL based on variant
+ * @param {URL} url - The original URL
+ * @param {string} variant - The assigned variant ('A' or 'B')
+ * @returns {URL} The transformed URL
+ */
+function transformUrlForVariant(url, variant) {
+  // Check if this path should be tested
+  if (!shouldTestPath(url.pathname)) {
+    return url;
+  }
+  
+  // Transform path
+  const transformedPath = transformPathForVariant(url.pathname, variant);
+  
+  // Check for origin change
+  const variantOrigin = getVariantOrigin(url.href, variant);
+  
+  if (variantOrigin) {
+    // Create new URL with different origin
+    const newUrl = new URL(transformedPath + url.search, variantOrigin);
+    return newUrl;
+  }
+  
+  // Just update the pathname
+  const newUrl = new URL(url);
+  newUrl.pathname = transformedPath;
+  return newUrl;
+}
+
+/**
  * Determines cache TTL in seconds based on file extension or path
  * @param {string} pathname - The request pathname
  * @returns {number} Cache TTL in seconds
@@ -453,19 +651,56 @@ export default {
       const variant = variantInfo.variant;
       const isNewAssignment = variantInfo.isNewAssignment;
 
+      // Check if A/B testing is enabled and if this path should be tested
+      const shouldTest = isABTestingEnabled() && shouldTestPath(url.pathname);
+      let routingUrl = url;
+      let routingInfo = null;
+
+      if (shouldTest) {
+        // Transform URL based on variant
+        routingUrl = transformUrlForVariant(url, variant);
+        if (routingUrl.href !== url.href) {
+          routingInfo = {
+            originalPath: url.pathname,
+            routedPath: routingUrl.pathname,
+            originalOrigin: url.origin,
+            routedOrigin: routingUrl.origin,
+            strategy: AB_TEST_CONFIG.variantBRouting.strategy,
+          };
+          console.log('A/B Test Routing:', JSON.stringify(routingInfo, null, 2));
+        }
+      }
+
       // Log basic request information
       console.log(`[${new Date().toISOString()}] ${method} ${url.pathname}`);
       console.log('Request URL:', url.href);
       console.log('Request Method:', method);
       console.log('A/B Test Variant:', variant, isNewAssignment ? '(new assignment)' : '(from cookie)');
+      console.log('A/B Testing:', shouldTest ? 'enabled for this path' : 'disabled or path excluded');
+      if (routingInfo) {
+        console.log('Routed URL:', routingUrl.href);
+      }
       console.log('Request Headers:', JSON.stringify(headers, null, 2));
 
       // Handle different request methods
       switch (method) {
         case 'GET':
           // Generate custom cache key (normalizes query params)
+          // Use routed URL if A/B testing is active
           const cache = caches.default;
-          const cacheKey = generateCacheKey(request, url);
+          const cacheKeyUrl = shouldTest ? routingUrl : url;
+          let cacheKey = generateCacheKey(request, cacheKeyUrl);
+          
+          // Add variant to cache key if testing is enabled
+          // This ensures different variants are cached separately
+          if (shouldTest) {
+            const variantCacheKeyUrl = new URL(cacheKey.url);
+            variantCacheKeyUrl.searchParams.set('_variant', variant);
+            cacheKey = new Request(variantCacheKeyUrl.toString(), {
+              method: request.method,
+              headers: request.headers,
+            });
+          }
           
           // Log cache key info
           const originalQuery = url.search;
@@ -509,11 +744,32 @@ export default {
           
           console.log('Cache MISS for:', url.pathname);
           
+          // Fetch from origin using routed URL if A/B testing is active
           // In a real scenario, you would fetch from origin here
+          let originResponse = null;
+          if (shouldTest && routingInfo && routingInfo.routedOrigin !== routingInfo.originalOrigin) {
+            // Different origin - fetch from variant origin
+            console.log(`Fetching from variant origin: ${routingUrl.href}`);
+            // Uncomment when ready to fetch from origin:
+            // const originRequest = new Request(routingUrl.href, {
+            //   method: request.method,
+            //   headers: request.headers,
+            // });
+            // originResponse = await fetch(originRequest);
+          } else if (shouldTest && routingInfo) {
+            // Same origin, different path - fetch from routed path
+            console.log(`Fetching from routed path: ${routingUrl.pathname}`);
+            // Uncomment when ready to fetch from origin:
+            // const originRequest = new Request(routingUrl.href, {
+            //   method: request.method,
+            //   headers: request.headers,
+            // });
+            // originResponse = await fetch(originRequest);
+          }
           // For now, we'll create a response as if it came from origin
-          const originResponse = null; // Replace with: await fetch(originUrl, request);
+          // Replace with: await fetch(routingUrl.href, request);
           
-          // Determine content type
+          // Determine content type (use original pathname for content type detection)
           const contentType = getContentType(url.pathname);
           
           // Create response headers
@@ -523,10 +779,19 @@ export default {
             'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
-          // Apply cache headers (respects origin headers if available)
-          applyCacheHeaders(originResponse, url.pathname, responseHeaders);
+          // Add routing info header if routing occurred
+          if (routingInfo) {
+            responseHeaders.set('X-AB-Test-Routed', 'true');
+            responseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
+            responseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+          }
           
-          const ttlSeconds = getCacheTTL(url.pathname);
+          // Apply cache headers (respects origin headers if available)
+          // Use routed pathname for cache TTL calculation
+          const pathnameForCache = shouldTest ? routingUrl.pathname : url.pathname;
+          applyCacheHeaders(originResponse, pathnameForCache, responseHeaders);
+          
+          const ttlSeconds = getCacheTTL(pathnameForCache);
           console.log(`Cache TTL: ${ttlSeconds} seconds (${Math.round(ttlSeconds / 60)} minutes)`);
           console.log('Cache-Control:', responseHeaders.get('Cache-Control'));
           console.log('ETag:', responseHeaders.get('ETag'));
@@ -655,8 +920,20 @@ export default {
 
         case 'HEAD':
           // Generate custom cache key for HEAD requests too
+          // Use routed URL if A/B testing is active
           const headCache = caches.default;
-          const headCacheKey = generateCacheKey(request, url);
+          const headCacheKeyUrl = shouldTest ? routingUrl : url;
+          let headCacheKey = generateCacheKey(request, headCacheKeyUrl);
+          
+          // Add variant to cache key if testing is enabled
+          if (shouldTest) {
+            const headVariantCacheKeyUrl = new URL(headCacheKey.url);
+            headVariantCacheKeyUrl.searchParams.set('_variant', variant);
+            headCacheKey = new Request(headVariantCacheKeyUrl.toString(), {
+              method: request.method,
+              headers: request.headers,
+            });
+          }
           
           // Log cache key info
           const headOriginalQuery = url.search;
@@ -700,10 +977,19 @@ export default {
           
           console.log('Cache MISS (HEAD) for:', url.pathname);
           
-          // In a real scenario, you would fetch from origin here
-          const headOriginResponse = null; // Replace with: await fetch(originUrl, request);
+          // Fetch from origin using routed URL if A/B testing is active
+          let headOriginResponse = null;
+          if (shouldTest && routingInfo) {
+            console.log(`Fetching from routed path (HEAD): ${routingUrl.pathname}`);
+            // Uncomment when ready to fetch from origin:
+            // const headOriginRequest = new Request(routingUrl.href, {
+            //   method: request.method,
+            //   headers: request.headers,
+            // });
+            // headOriginResponse = await fetch(headOriginRequest);
+          }
           
-          // Determine content type
+          // Determine content type (use original pathname)
           const headContentType = getContentType(url.pathname);
           
           // Create response headers
@@ -713,10 +999,18 @@ export default {
             'X-AB-Test-Variant': variant, // Add variant to response headers
           });
           
-          // Apply cache headers
-          applyCacheHeaders(headOriginResponse, url.pathname, headResponseHeaders);
+          // Add routing info header if routing occurred
+          if (routingInfo) {
+            headResponseHeaders.set('X-AB-Test-Routed', 'true');
+            headResponseHeaders.set('X-AB-Test-Original-Path', routingInfo.originalPath);
+            headResponseHeaders.set('X-AB-Test-Routed-Path', routingInfo.routedPath);
+          }
           
-          const headTtlSeconds = getCacheTTL(url.pathname);
+          // Apply cache headers (use routed pathname for cache TTL)
+          const headPathnameForCache = shouldTest ? routingUrl.pathname : url.pathname;
+          applyCacheHeaders(headOriginResponse, headPathnameForCache, headResponseHeaders);
+          
+          const headTtlSeconds = getCacheTTL(headPathnameForCache);
           console.log(`Cache TTL (HEAD): ${headTtlSeconds} seconds (${Math.round(headTtlSeconds / 60)} minutes)`);
           
           let headResponse = new Response(null, {
