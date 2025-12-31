@@ -23,6 +23,7 @@ import {
 } from './utils/image.js';
 import { getOrAssignVariantForTest } from './utils/variants.js';
 import { getGeoRoutingInfo } from './utils/geo-routing.js';
+import { getRegionContentForRequest, buildRegionContentUrl } from './utils/region-content.js';
 
 // Handlers
 import {
@@ -58,6 +59,13 @@ export default {
       // Geographic routing: Determine origin based on country
       const geoRoutingInfo = getGeoRoutingInfo(request);
       console.log('Geographic Routing:', JSON.stringify(geoRoutingInfo, null, 2));
+
+      // Region-specific content: Check if path should serve region-specific content
+      let regionContentInfo = null;
+      regionContentInfo = getRegionContentForRequest(request, url.pathname, geoRoutingInfo);
+      if (regionContentInfo) {
+        console.log('Region-Specific Content:', JSON.stringify(regionContentInfo, null, 2));
+      }
 
       // Detect device type
       const deviceInfo = detectDevice(request);
@@ -104,9 +112,17 @@ export default {
         }
       }
 
+      // Apply region-specific content path if applicable
+      // This happens before image optimization so images can also be region-specific
+      let contentUrl = routingUrl;
+      if (regionContentInfo) {
+        contentUrl = buildRegionContentUrl(routingUrl, regionContentInfo.contentPath);
+        console.log(`Region-Specific Content: ${routingUrl.pathname} -> ${contentUrl.pathname}`);
+      }
+
       // Image optimization: resizing and format negotiation
       let resizeParams = null;
-      let imageUrl = routingUrl;
+      let imageUrl = contentUrl;
       let shouldResize = false;
 
       if (isImagePath(url.pathname)) {
@@ -121,23 +137,23 @@ export default {
             console.log(`Image Resizing: Auto-reducing for mobile device - setting width to ${defaultMobileWidth}px (50% of max)`);
           }
 
-          // Build Cloudflare Image Resizing URL
-          imageUrl = buildCloudflareImageResizeUrl(routingUrl, resizeParams, formatNegotiation);
+          // Build Cloudflare Image Resizing URL (use contentUrl which may have region-specific path)
+          imageUrl = buildCloudflareImageResizeUrl(contentUrl, resizeParams, formatNegotiation);
           console.log(`Image Resizing: Applied - Width: ${resizeParams.width || 'auto'}, Height: ${resizeParams.height || 'auto'}, Quality: ${resizeParams.quality}`);
           console.log(`Resized Image URL: ${imageUrl.pathname}`);
         } else if (formatNegotiation && formatNegotiation.shouldTransform) {
           // Only format negotiation, no resizing
-          imageUrl = transformImageUrlForFormat(routingUrl, formatNegotiation);
+          imageUrl = transformImageUrlForFormat(contentUrl, formatNegotiation);
           console.log(`Content Negotiation: ${formatNegotiation.originalFormat} -> ${formatNegotiation.bestFormat}`);
           console.log(`Transformed Image URL: ${imageUrl.pathname}`);
         } else {
-          imageUrl = routingUrl;
+          imageUrl = contentUrl;
           if (formatNegotiation) {
             console.log(`Content Negotiation: Using original format (${formatNegotiation.originalFormat})`);
           }
         }
       } else {
-        imageUrl = routingUrl;
+        imageUrl = contentUrl;
       }
 
       // Log request information
@@ -163,13 +179,13 @@ export default {
         case 'GET':
           return await handleGET(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx
           );
 
         case 'HEAD':
           return await handleHEAD(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx
           );
 
         case 'POST':

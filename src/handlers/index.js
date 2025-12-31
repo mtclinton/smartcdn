@@ -7,19 +7,19 @@
 import { generateCacheKey, handleConditionalRequest, applyCacheHeaders, getCacheTTL } from '../utils/cache.js';
 import { getContentType } from '../utils/request.js';
 import { isImagePath } from '../utils/image.js';
-import { addDeviceHeaders, addImageHeaders, addABTestHeaders, addGeoRoutingHeaders, getNegotiatedContentType } from '../utils/headers.js';
+import { addDeviceHeaders, addImageHeaders, addABTestHeaders, addGeoRoutingHeaders, addRegionContentHeaders, getNegotiatedContentType } from '../utils/headers.js';
 import { setTestVariantCookie } from '../utils/variants.js';
 import { buildOriginUrl } from '../utils/geo-routing.js';
 
 /**
  * Handles GET requests with caching, A/B testing, and image optimization
  */
-export async function handleGET(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx) {
+export async function handleGET(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
   const cache = caches.default;
   const finalUrl = imageUrl; // imageUrl is the final URL after all transformations
   let cacheKey = generateCacheKey(request, finalUrl);
 
-  // Add test ID, variant, format, resize params, and geographic routing to cache key
+  // Add test ID, variant, format, resize params, geographic routing, and region content to cache key
   const enhancedCacheKeyUrl = new URL(cacheKey.url);
   if (testInfo) {
     enhancedCacheKeyUrl.searchParams.set('_test', testInfo.testId);
@@ -37,6 +37,11 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   if (geoRoutingInfo && geoRoutingInfo.enabled) {
     enhancedCacheKeyUrl.searchParams.set('_geo_region', geoRoutingInfo.region);
   }
+  // Add region-specific content to cache key
+  if (regionContentInfo && regionContentInfo.enabled) {
+    enhancedCacheKeyUrl.searchParams.set('_region_content', regionContentInfo.mappingId);
+    enhancedCacheKeyUrl.searchParams.set('_region_content_path', regionContentInfo.contentPath);
+  }
   cacheKey = new Request(enhancedCacheKeyUrl.toString(), {
     method: request.method,
     headers: request.headers,
@@ -46,7 +51,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   const cachedResponse = await cache.match(cacheKey);
   if (cachedResponse) {
     console.log('Cache HIT for:', url.pathname);
-    return buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo);
+    return buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo);
   }
 
   console.log('Cache MISS for:', url.pathname);
@@ -57,8 +62,13 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   
   if (geoRoutingInfo && geoRoutingInfo.enabled) {
     // Build origin URL using geographic routing
+    // finalUrl already includes region-specific content path if applicable
     originUrl = buildOriginUrl(finalUrl, geoRoutingInfo.origin);
-    console.log(`Fetching from geographic origin: ${originUrl.href} (region: ${geoRoutingInfo.region}, country: ${geoRoutingInfo.country || 'unknown'})`);
+    let logMessage = `Fetching from geographic origin: ${originUrl.href} (region: ${geoRoutingInfo.region}, country: ${geoRoutingInfo.country || 'unknown'})`;
+    if (regionContentInfo && regionContentInfo.enabled) {
+      logMessage += ` [Region-specific content: ${regionContentInfo.originalPath} -> ${regionContentInfo.contentPath}]`;
+    }
+    console.log(logMessage);
     
     try {
       // Create a new request to the origin, preserving method and headers
@@ -95,6 +105,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   addImageHeaders(responseHeaders, url.pathname, imageOptParams, formatNegotiation, resizeParams, shouldResize);
   addABTestHeaders(responseHeaders, testInfo, routingInfo);
   addGeoRoutingHeaders(responseHeaders, geoRoutingInfo);
+  addRegionContentHeaders(responseHeaders, regionContentInfo);
 
   // Use origin response body if available, otherwise use default
   let responseBody = "Hello from SmartCDN - GET request";
@@ -139,7 +150,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
 /**
  * Handles HEAD requests (similar to GET but no body)
  */
-export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx) {
+export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
   const headCache = caches.default;
   const headFinalUrl = imageUrl;
   let headCacheKey = generateCacheKey(request, headFinalUrl);
@@ -162,6 +173,11 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   if (geoRoutingInfo && geoRoutingInfo.enabled) {
     headEnhancedCacheKeyUrl.searchParams.set('_geo_region', geoRoutingInfo.region);
   }
+  // Add region-specific content to cache key
+  if (regionContentInfo && regionContentInfo.enabled) {
+    headEnhancedCacheKeyUrl.searchParams.set('_region_content', regionContentInfo.mappingId);
+    headEnhancedCacheKeyUrl.searchParams.set('_region_content_path', regionContentInfo.contentPath);
+  }
   headCacheKey = new Request(headEnhancedCacheKeyUrl.toString(), {
     method: request.method,
     headers: request.headers,
@@ -170,7 +186,7 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   const cachedHeadResponse = await headCache.match(headCacheKey);
   if (cachedHeadResponse) {
     console.log('Cache HIT (HEAD) for:', url.pathname);
-    return buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, true);
+    return buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, true);
   }
 
   console.log('Cache MISS (HEAD) for:', url.pathname);
@@ -204,6 +220,7 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   addImageHeaders(headResponseHeaders, url.pathname, imageOptParams, formatNegotiation, resizeParams, shouldResize);
   addABTestHeaders(headResponseHeaders, testInfo, routingInfo);
   addGeoRoutingHeaders(headResponseHeaders, geoRoutingInfo);
+  addRegionContentHeaders(headResponseHeaders, regionContentInfo);
 
   applyCacheHeaders(headOriginResponse, headFinalUrl.pathname, headResponseHeaders);
 
@@ -375,7 +392,7 @@ export function handleOPTIONS() {
 /**
  * Builds a response from cached data with all headers
  */
-function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, pathname, request, geoRoutingInfo = null, isHead = false) {
+function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, pathname, request, geoRoutingInfo = null, regionContentInfo = null, isHead = false) {
   const response = new Response(
     isHead ? null : cachedResponse.body,
     {
@@ -389,6 +406,7 @@ function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInf
   addImageHeaders(response.headers, pathname, imageOptParams, formatNegotiation, resizeParams, shouldResize);
   addABTestHeaders(response.headers, testInfo);
   addGeoRoutingHeaders(response.headers, geoRoutingInfo);
+  addRegionContentHeaders(response.headers, regionContentInfo);
 
   // Set cookie if needed
   let finalResponse = response;
