@@ -87,6 +87,24 @@ export function addABTestHeaders(headers, testInfo, routingInfo = null) {
 }
 
 /**
+ * Adds geographic routing information headers to response
+ * @param {Headers} headers - Response headers to modify
+ * @param {Object} geoRoutingInfo - Geographic routing information object
+ */
+export function addGeoRoutingHeaders(headers, geoRoutingInfo) {
+  if (!geoRoutingInfo || !geoRoutingInfo.enabled) {
+    return;
+  }
+
+  headers.set('X-Geo-Routing-Enabled', 'true');
+  if (geoRoutingInfo.country) {
+    headers.set('X-Geo-Country', geoRoutingInfo.country);
+  }
+  headers.set('X-Geo-Region', geoRoutingInfo.region);
+  headers.set('X-Geo-Origin', geoRoutingInfo.origin);
+}
+
+/**
  * Gets Content-Type for negotiated format
  * @param {string} pathname - Request pathname
  * @param {Object} formatNegotiation - Format negotiation result (optional)
