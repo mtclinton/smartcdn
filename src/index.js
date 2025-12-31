@@ -22,6 +22,7 @@ import {
   shouldResizeImage
 } from './utils/image.js';
 import { getOrAssignVariantForTest } from './utils/variants.js';
+import { getGeoRoutingInfo } from './utils/geo-routing.js';
 
 // Handlers
 import {
@@ -53,6 +54,10 @@ export default {
       const url = new URL(request.url);
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
+
+      // Geographic routing: Determine origin based on country
+      const geoRoutingInfo = getGeoRoutingInfo(request);
+      console.log('Geographic Routing:', JSON.stringify(geoRoutingInfo, null, 2));
 
       // Detect device type
       const deviceInfo = detectDevice(request);
@@ -158,13 +163,13 @@ export default {
         case 'GET':
           return await handleGET(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx
           );
 
         case 'HEAD':
           return await handleHEAD(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, ctx
           );
 
         case 'POST':
