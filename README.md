@@ -121,13 +121,74 @@ wrangler dev
 
 # Deploy to development
 wrangler deploy --env development
-
-# Deploy to staging
-wrangler deploy --env staging
-
-# Deploy to production
-wrangler deploy --env production
 ```
+
+### Deployment
+
+The project includes automated deployment scripts with testing, smoke tests, and rollback capabilities.
+
+#### Staging Deployment
+
+```bash
+# Deploy to staging (runs tests, deploys, runs smoke tests)
+npm run deploy:staging
+
+# Or use the script directly
+node scripts/deploy.js staging
+```
+
+#### Production Deployment
+
+```bash
+# Deploy to production (runs tests, deploys, runs smoke tests)
+npm run deploy:production
+
+# Or use the script directly
+node scripts/deploy.js production
+```
+
+#### Rollback
+
+If a deployment fails or you need to rollback:
+
+```bash
+# Rollback staging
+npm run rollback:staging
+
+# Rollback production
+npm run rollback:production
+
+# Or use the script directly
+node scripts/rollback.js staging
+node scripts/rollback.js production
+```
+
+#### Smoke Tests
+
+Run smoke tests against a deployed environment:
+
+```bash
+# Test staging
+npm run smoke:staging
+
+# Test production
+npm run smoke:production
+
+# Or use the script directly
+node scripts/smoke-tests.js staging
+```
+
+#### Deployment Process
+
+The deployment script performs the following steps:
+
+1. **Run Tests**: Executes unit tests to ensure code quality
+2. **Build Worker**: Validates worker code (no build step required for JS)
+3. **Deploy**: Deploys to Cloudflare Workers using Wrangler
+4. **Smoke Tests**: Runs health checks against the deployed worker
+5. **Rollback**: Automatically rolls back if smoke tests fail
+
+Deployment information is stored in `.deployment-info.json` for rollback purposes.
 
 ## Testing
 
