@@ -1,0 +1,22 @@
+{
+  "name": "smartcdn",
+  "version": "1.0.0",
+  "description": "Cloudflare Workers CDN with A/B Testing and Image Optimization",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "test:unit": "vitest --exclude test/integration.test.js",
+    "test:integration": "vitest test/integration.test.js --no-coverage"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "vitest": "^4.0.16",
+    "@vitest/coverage-v8": "^4.0.16"
+  }
+}
+
