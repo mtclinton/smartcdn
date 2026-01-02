@@ -126,6 +126,32 @@ export function addRegionContentHeaders(headers, regionContentInfo) {
 }
 
 /**
+ * Adds timing information headers to response
+ * @param {Headers} headers - Response headers to modify
+ * @param {Object} timing - Timing tracker object
+ * @param {string} cacheStatus - Cache status (HIT, MISS, BYPASS) - optional, will use timing if not provided
+ */
+export function addTimingHeaders(headers, timing, cacheStatus = null) {
+  if (!timing) {
+    return;
+  }
+
+  // Use provided cache status or fall back to timing tracker
+  const status = cacheStatus || timing.getCacheStatus();
+  const totalTime = timing.getTotalTime();
+  const originFetchTime = timing.getOriginFetchTime();
+
+  headers.set('X-Cache-Status', status);
+  headers.set('X-Response-Time', `${totalTime.toFixed(2)}ms`);
+  
+  if (originFetchTime !== null) {
+    headers.set('X-Origin-Time', `${originFetchTime.toFixed(2)}ms`);
+  } else {
+    headers.set('X-Origin-Time', '0ms');
+  }
+}
+
+/**
  * Gets Content-Type for negotiated format
  * @param {string} pathname - Request pathname
  * @param {Object} formatNegotiation - Format negotiation result (optional)

@@ -7,14 +7,23 @@
 import { generateCacheKey, handleConditionalRequest, applyCacheHeaders, getCacheTTL } from '../utils/cache.js';
 import { getContentType } from '../utils/request.js';
 import { isImagePath } from '../utils/image.js';
-import { addDeviceHeaders, addImageHeaders, addABTestHeaders, addGeoRoutingHeaders, addRegionContentHeaders, getNegotiatedContentType } from '../utils/headers.js';
+import { addDeviceHeaders, addImageHeaders, addABTestHeaders, addGeoRoutingHeaders, addRegionContentHeaders, addTimingHeaders, getNegotiatedContentType } from '../utils/headers.js';
 import { setTestVariantCookie } from '../utils/variants.js';
 import { buildOriginUrl } from '../utils/geo-routing.js';
+import { createTimingTracker, formatTiming } from '../utils/timing.js';
+import { isRequestCacheable, isResponseCacheable, determineCacheStatus, recordCacheEvent } from '../utils/cache-tracking.js';
+import { logRequest } from '../utils/logging.js';
 
 /**
  * Handles GET requests with caching, A/B testing, and image optimization
  */
 export async function handleGET(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
+  // Create timing tracker for this request
+  const timing = createTimingTracker();
+
+  // Check if request is cacheable
+  const requestCacheable = isRequestCacheable(request, 'GET');
+
   const cache = caches.default;
   const finalUrl = imageUrl; // imageUrl is the final URL after all transformations
   let cacheKey = generateCacheKey(request, finalUrl);
@@ -47,18 +56,74 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     headers: request.headers,
   });
 
-  // Check cache
-  const cachedResponse = await cache.match(cacheKey);
+  // Check cache with timing (only if request is cacheable)
+  let cachedResponse = null;
+  if (requestCacheable) {
+    timing.startCacheLookup();
+    cachedResponse = await cache.match(cacheKey);
+    timing.endCacheLookup();
+  }
+  
   if (cachedResponse) {
-    console.log('Cache HIT for:', url.pathname);
-    return buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo);
+    const cacheLookupTime = timing.getCacheLookupTime();
+    console.log(`Cache HIT for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
+    
+    timing.endTotal();
+    const metrics = timing.getMetrics();
+    console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
+    
+    // Track cache event
+    const responseCacheable = isResponseCacheable(response);
+    const cacheStatus = determineCacheStatus(true, requestCacheable, responseCacheable);
+    recordCacheEvent({
+      status: cacheStatus,
+      path: url.pathname,
+      method: 'GET',
+      statusCode: response.status,
+      country: geoRoutingInfo?.country || null,
+      region: geoRoutingInfo?.region || null,
+      cacheLookupTime: timing.getCacheLookupTime(),
+      originFetchTime: null,
+      totalTime: timing.getTotalTime(),
+    });
+    
+    const response = buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, timing, false, cacheStatus);
+    
+    // Structured logging for cache hit
+    logRequest({
+      requestUrl: url.href,
+      method: 'GET',
+      country: geoRoutingInfo?.country || null,
+      deviceType: deviceInfo.deviceType,
+      abTestVariant: testInfo?.variant || null,
+      cacheStatus: cacheStatus,
+      responseTime: timing.getTotalTime(),
+      statusCode: response.status,
+      additionalData: {
+        path: url.pathname,
+        region: geoRoutingInfo?.region || null,
+        cacheLookupTime: timing.getCacheLookupTime(),
+        originFetchTime: null,
+        testId: testInfo?.testId || null,
+        regionContent: regionContentInfo?.enabled ? {
+          mappingId: regionContentInfo.mappingId,
+          originalPath: regionContentInfo.originalPath,
+          contentPath: regionContentInfo.contentPath,
+        } : null,
+      },
+    });
+    
+    return response;
   }
 
-  console.log('Cache MISS for:', url.pathname);
+  const cacheLookupTime = timing.getCacheLookupTime();
+  console.log(`Cache MISS for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
 
-  // Fetch from geographic origin
+  // Fetch from geographic origin with timing
   let originResponse = null;
   let originUrl = null;
+  
+  timing.startOriginFetch();
   
   if (geoRoutingInfo && geoRoutingInfo.enabled) {
     // Build origin URL using geographic routing
@@ -77,9 +142,13 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
         headers: request.headers,
       });
       originResponse = await fetch(originRequest);
-      console.log(`Origin response status: ${originResponse.status}`);
+      timing.endOriginFetch();
+      const originFetchTime = timing.getOriginFetchTime();
+      console.log(`Origin response status: ${originResponse.status} (fetch: ${formatTiming(originFetchTime)}ms)`);
     } catch (error) {
-      console.error('Error fetching from geographic origin:', error);
+      timing.endOriginFetch();
+      const originFetchTime = timing.getOriginFetchTime();
+      console.error(`Error fetching from geographic origin: ${error.message} (fetch: ${formatTiming(originFetchTime)}ms)`);
       // Continue with null originResponse - will use default response
     }
   } else if (finalUrl.href !== url.href) {
@@ -87,10 +156,17 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     console.log(`Fetching from A/B test origin: ${finalUrl.href} (original: ${url.href})`);
     try {
       originResponse = await fetch(finalUrl.href, request);
-      console.log(`Origin response status: ${originResponse.status}`);
+      timing.endOriginFetch();
+      const originFetchTime = timing.getOriginFetchTime();
+      console.log(`Origin response status: ${originResponse.status} (fetch: ${formatTiming(originFetchTime)}ms)`);
     } catch (error) {
-      console.error('Error fetching from A/B test origin:', error);
+      timing.endOriginFetch();
+      const originFetchTime = timing.getOriginFetchTime();
+      console.error(`Error fetching from A/B test origin: ${error.message} (fetch: ${formatTiming(originFetchTime)}ms)`);
     }
+  } else {
+    // No origin fetch needed
+    timing.endOriginFetch();
   }
 
   // Build response
@@ -142,8 +218,61 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     return conditionalCheck;
   }
 
-  // Cache the response
-  ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  // Cache the response (only if both request and response are cacheable)
+  const responseCacheable = isResponseCacheable(response);
+  if (requestCacheable && responseCacheable) {
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  }
+  
+  // End timing
+  timing.endTotal();
+  const metrics = timing.getMetrics();
+  console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
+  
+  // Track cache event
+  const wasCached = cachedResponse !== null;
+  const cacheStatus = determineCacheStatus(wasCached, requestCacheable, responseCacheable);
+  recordCacheEvent({
+    status: cacheStatus,
+    path: url.pathname,
+    method: 'GET',
+    statusCode: response.status,
+    country: geoRoutingInfo?.country || null,
+    region: geoRoutingInfo?.region || null,
+    cacheLookupTime: timing.getCacheLookupTime(),
+    originFetchTime: timing.getOriginFetchTime(),
+    totalTime: timing.getTotalTime(),
+  });
+  
+  console.log(`Cache Status: ${cacheStatus} (request cacheable: ${requestCacheable}, response cacheable: ${responseCacheable})`);
+  
+  // Add timing headers with cache status
+  addTimingHeaders(response.headers, timing, cacheStatus);
+  
+  // Structured logging
+  logRequest({
+    requestUrl: url.href,
+    method: 'GET',
+    country: geoRoutingInfo?.country || null,
+    deviceType: deviceInfo.deviceType,
+    abTestVariant: testInfo?.variant || null,
+    cacheStatus: cacheStatus,
+    responseTime: timing.getTotalTime(),
+    statusCode: response.status,
+    additionalData: {
+      path: url.pathname,
+      region: geoRoutingInfo?.region || null,
+      cacheLookupTime: timing.getCacheLookupTime(),
+      originFetchTime: timing.getOriginFetchTime(),
+      testId: testInfo?.testId || null,
+      regionContent: regionContentInfo?.enabled ? {
+        mappingId: regionContentInfo.mappingId,
+        originalPath: regionContentInfo.originalPath,
+        contentPath: regionContentInfo.contentPath,
+      } : null,
+    },
+  });
+  
   return response;
 }
 
@@ -151,6 +280,12 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
  * Handles HEAD requests (similar to GET but no body)
  */
 export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
+  // Create timing tracker for this request
+  const headTiming = createTimingTracker();
+
+  // Check if request is cacheable
+  const headRequestCacheable = isRequestCacheable(request, 'HEAD');
+
   const headCache = caches.default;
   const headFinalUrl = imageUrl;
   let headCacheKey = generateCacheKey(request, headFinalUrl);
@@ -183,16 +318,49 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     headers: request.headers,
   });
 
-  const cachedHeadResponse = await headCache.match(headCacheKey);
+  // Check cache with timing (only if request is cacheable)
+  let cachedHeadResponse = null;
+  if (headRequestCacheable) {
+    headTiming.startCacheLookup();
+    cachedHeadResponse = await headCache.match(headCacheKey);
+    headTiming.endCacheLookup();
+  }
+  
   if (cachedHeadResponse) {
-    console.log('Cache HIT (HEAD) for:', url.pathname);
-    return buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, true);
+    const cacheLookupTime = headTiming.getCacheLookupTime();
+    console.log(`Cache HIT (HEAD) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
+    
+    headTiming.endTotal();
+    const metrics = headTiming.getMetrics();
+    console.log('Timing Metrics (HEAD):', JSON.stringify(metrics, null, 2));
+    
+    // Track cache event
+    const headResponseCacheable = isResponseCacheable(cachedHeadResponse);
+    const headCacheStatus = determineCacheStatus(true, headRequestCacheable, headResponseCacheable);
+    recordCacheEvent({
+      status: headCacheStatus,
+      path: url.pathname,
+      method: 'HEAD',
+      statusCode: cachedHeadResponse.status,
+      country: geoRoutingInfo?.country || null,
+      region: geoRoutingInfo?.region || null,
+      cacheLookupTime: headTiming.getCacheLookupTime(),
+      originFetchTime: null,
+      totalTime: headTiming.getTotalTime(),
+    });
+    
+    const response = buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, headTiming, true, headCacheStatus);
+    return response;
   }
 
-  console.log('Cache MISS (HEAD) for:', url.pathname);
+  const cacheLookupTime = headTiming.getCacheLookupTime();
+  console.log(`Cache MISS (HEAD) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
 
-  // Fetch from geographic origin (HEAD request)
+  // Fetch from geographic origin (HEAD request) with timing
   let headOriginResponse = null;
+  
+  headTiming.startOriginFetch();
+  
   if (geoRoutingInfo && geoRoutingInfo.enabled) {
     const headOriginUrl = buildOriginUrl(headFinalUrl, geoRoutingInfo.origin);
     console.log(`Fetching HEAD from geographic origin: ${headOriginUrl.href} (region: ${geoRoutingInfo.region})`);
@@ -203,10 +371,17 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
         headers: request.headers,
       });
       headOriginResponse = await fetch(headOriginRequest);
-      console.log(`Origin HEAD response status: ${headOriginResponse.status}`);
+      headTiming.endOriginFetch();
+      const originFetchTime = headTiming.getOriginFetchTime();
+      console.log(`Origin HEAD response status: ${headOriginResponse.status} (fetch: ${formatTiming(originFetchTime)}ms)`);
     } catch (error) {
-      console.error('Error fetching HEAD from geographic origin:', error);
+      headTiming.endOriginFetch();
+      const originFetchTime = headTiming.getOriginFetchTime();
+      console.error(`Error fetching HEAD from geographic origin: ${error.message} (fetch: ${formatTiming(originFetchTime)}ms)`);
     }
+  } else {
+    // No origin fetch needed
+    headTiming.endOriginFetch();
   }
 
   // Build response headers
@@ -253,7 +428,56 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     return headConditionalCheck;
   }
 
-  ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
+  // Cache the response (only if both request and response are cacheable)
+  const headResponseCacheable = isResponseCacheable(headResponse);
+  if (headRequestCacheable && headResponseCacheable) {
+    ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
+  }
+  
+  // End timing
+  headTiming.endTotal();
+  const metrics = headTiming.getMetrics();
+  console.log('Timing Metrics (HEAD):', JSON.stringify(metrics, null, 2));
+  
+  // Track cache event
+  const headWasCached = cachedHeadResponse !== null;
+  const headCacheStatus = determineCacheStatus(headWasCached, headRequestCacheable, headResponseCacheable);
+  recordCacheEvent({
+    status: headCacheStatus,
+    path: url.pathname,
+    method: 'HEAD',
+    statusCode: headResponse.status,
+    country: geoRoutingInfo?.country || null,
+    region: geoRoutingInfo?.region || null,
+    cacheLookupTime: headTiming.getCacheLookupTime(),
+    originFetchTime: headTiming.getOriginFetchTime(),
+    totalTime: headTiming.getTotalTime(),
+  });
+  
+  console.log(`Cache Status (HEAD): ${headCacheStatus} (request cacheable: ${headRequestCacheable}, response cacheable: ${headResponseCacheable})`);
+  
+  // Add timing headers with cache status
+  addTimingHeaders(headResponse.headers, headTiming, headCacheStatus);
+  
+  // Structured logging
+  logRequest({
+    requestUrl: url.href,
+    method: 'HEAD',
+    country: geoRoutingInfo?.country || null,
+    deviceType: deviceInfo.deviceType,
+    abTestVariant: testInfo?.variant || null,
+    cacheStatus: headCacheStatus,
+    responseTime: headTiming.getTotalTime(),
+    statusCode: headResponse.status,
+    additionalData: {
+      path: url.pathname,
+      region: geoRoutingInfo?.region || null,
+      cacheLookupTime: headTiming.getCacheLookupTime(),
+      originFetchTime: headTiming.getOriginFetchTime(),
+      testId: testInfo?.testId || null,
+    },
+  });
+  
   return headResponse;
 }
 
@@ -291,13 +515,27 @@ export async function handlePOST(request, deviceInfo, testInfo) {
     postResponse = setTestVariantCookie(postResponse, testInfo.testId, testInfo.variant);
   }
 
+  // Track cache event (POST requests are always BYPASS)
+  const url = new URL(request.url);
+  recordCacheEvent({
+    status: 'BYPASS',
+    path: url.pathname,
+    method: 'POST',
+    statusCode: postResponse.status,
+    country: null,
+    region: null,
+    cacheLookupTime: null,
+    originFetchTime: null,
+    totalTime: null,
+  });
+
   return postResponse;
 }
 
 /**
  * Handles PUT requests
  */
-export function handlePUT(deviceInfo, testInfo) {
+export function handlePUT(request, deviceInfo, testInfo) {
   const putHeaders = new Headers({
     "Content-Type": "text/plain",
     "X-Request-Method": "PUT",
@@ -318,13 +556,43 @@ export function handlePUT(deviceInfo, testInfo) {
     putResponse = setTestVariantCookie(putResponse, testInfo.testId, testInfo.variant);
   }
 
+  // Track cache event (PUT requests are always BYPASS)
+  const url = new URL(request.url);
+  recordCacheEvent({
+    status: 'BYPASS',
+    path: url.pathname,
+    method: 'PUT',
+    statusCode: putResponse.status,
+    country: null,
+    region: null,
+    cacheLookupTime: null,
+    originFetchTime: null,
+    totalTime: null,
+  });
+
+  // Structured logging
+  logRequest({
+    requestUrl: url.href,
+    method: 'PUT',
+    country: null,
+    deviceType: deviceInfo.deviceType,
+    abTestVariant: testInfo?.variant || null,
+    cacheStatus: 'BYPASS',
+    responseTime: null,
+    statusCode: putResponse.status,
+    additionalData: {
+      path: url.pathname,
+      testId: testInfo?.testId || null,
+    },
+  });
+
   return putResponse;
 }
 
 /**
  * Handles DELETE requests
  */
-export function handleDELETE(deviceInfo, testInfo) {
+export function handleDELETE(request, deviceInfo, testInfo) {
   const deleteHeaders = new Headers({
     "Content-Type": "text/plain",
     "X-Request-Method": "DELETE",
@@ -345,13 +613,43 @@ export function handleDELETE(deviceInfo, testInfo) {
     deleteResponse = setTestVariantCookie(deleteResponse, testInfo.testId, testInfo.variant);
   }
 
+  // Track cache event (DELETE requests are always BYPASS)
+  const url = new URL(request.url);
+  recordCacheEvent({
+    status: 'BYPASS',
+    path: url.pathname,
+    method: 'DELETE',
+    statusCode: deleteResponse.status,
+    country: null,
+    region: null,
+    cacheLookupTime: null,
+    originFetchTime: null,
+    totalTime: null,
+  });
+
+  // Structured logging
+  logRequest({
+    requestUrl: url.href,
+    method: 'DELETE',
+    country: null,
+    deviceType: deviceInfo.deviceType,
+    abTestVariant: testInfo?.variant || null,
+    cacheStatus: 'BYPASS',
+    responseTime: null,
+    statusCode: deleteResponse.status,
+    additionalData: {
+      path: url.pathname,
+      testId: testInfo?.testId || null,
+    },
+  });
+
   return deleteResponse;
 }
 
 /**
  * Handles PATCH requests
  */
-export function handlePATCH(deviceInfo, testInfo) {
+export function handlePATCH(request, deviceInfo, testInfo) {
   const patchHeaders = new Headers({
     "Content-Type": "text/plain",
     "X-Request-Method": "PATCH",
@@ -371,6 +669,36 @@ export function handlePATCH(deviceInfo, testInfo) {
   if (testInfo && testInfo.isNewAssignment) {
     patchResponse = setTestVariantCookie(patchResponse, testInfo.testId, testInfo.variant);
   }
+
+  // Track cache event (PATCH requests are always BYPASS)
+  const url = new URL(request.url);
+  recordCacheEvent({
+    status: 'BYPASS',
+    path: url.pathname,
+    method: 'PATCH',
+    statusCode: patchResponse.status,
+    country: null,
+    region: null,
+    cacheLookupTime: null,
+    originFetchTime: null,
+    totalTime: null,
+  });
+
+  // Structured logging
+  logRequest({
+    requestUrl: url.href,
+    method: 'PATCH',
+    country: null,
+    deviceType: deviceInfo.deviceType,
+    abTestVariant: testInfo?.variant || null,
+    cacheStatus: 'BYPASS',
+    responseTime: null,
+    statusCode: patchResponse.status,
+    additionalData: {
+      path: url.pathname,
+      testId: testInfo?.testId || null,
+    },
+  });
 
   return patchResponse;
 }
@@ -392,7 +720,7 @@ export function handleOPTIONS() {
 /**
  * Builds a response from cached data with all headers
  */
-function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, pathname, request, geoRoutingInfo = null, regionContentInfo = null, isHead = false) {
+function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, pathname, request, geoRoutingInfo = null, regionContentInfo = null, timing = null, isHead = false, cacheStatus = null) {
   const response = new Response(
     isHead ? null : cachedResponse.body,
     {
@@ -407,6 +735,7 @@ function buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInf
   addABTestHeaders(response.headers, testInfo);
   addGeoRoutingHeaders(response.headers, geoRoutingInfo);
   addRegionContentHeaders(response.headers, regionContentInfo);
+  addTimingHeaders(response.headers, timing, cacheStatus);
 
   // Set cookie if needed
   let finalResponse = response;
