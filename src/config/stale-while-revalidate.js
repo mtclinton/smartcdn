@@ -4,27 +4,29 @@
  * Configuration for stale-while-revalidate caching pattern
  */
 
-/**
- * Global master switch for stale-while-revalidate
- */
-export const STALE_WHILE_REVALIDATE_ENABLED = true;
+import { getEnvConfig } from '../utils/env-config.js';
 
 /**
- * Stale-While-Revalidate Configuration
+ * Gets stale-while-revalidate configuration from environment
+ * @param {Object} env - Worker environment object
+ * @returns {Object} Stale-while-revalidate configuration
  */
-export const SWR_CONFIG = {
-  /**
-   * Maximum age (in seconds) for content to be considered fresh
-   * After this time, content is considered stale but can still be served
-   */
-  maxAge: 60 * 60, // 1 hour (3600 seconds)
+export function getSWRConfig(env = {}) {
+  const envConfig = getEnvConfig(env);
+  
+  return {
+    /**
+     * Maximum age (in seconds) for content to be considered fresh
+     * After this time, content is considered stale but can still be served
+     */
+    maxAge: envConfig.staleWhileRevalidate.maxAge,
 
-  /**
-   * Stale-while-revalidate window (in seconds)
-   * During this window after maxAge, stale content can be served while revalidating
-   * After maxAge + staleWhileRevalidate, content must be revalidated before serving
-   */
-  staleWhileRevalidate: 24 * 60 * 60, // 24 hours (86400 seconds)
+    /**
+     * Stale-while-revalidate window (in seconds)
+     * During this window after maxAge, stale content can be served while revalidating
+     * After maxAge + staleWhileRevalidate, content must be revalidated before serving
+     */
+    staleWhileRevalidate: envConfig.staleWhileRevalidate.staleWhileRevalidate,
 
   /**
    * Enable stale-while-revalidate for specific content types
@@ -52,17 +54,40 @@ export const SWR_CONFIG = {
    * @param {string} pathname - Request pathname
    * @returns {boolean} Whether to use SWR
    */
-  shouldUseSWR: (request, pathname) => {
-    // Default: use SWR for all requests (unless disabled by other rules)
-    return true;
-  },
-};
+    shouldUseSWR: (request, pathname) => {
+      // Default: use SWR for all requests (unless disabled by other rules)
+      return true;
+    },
+  };
+}
+
+/**
+ * Default configuration (for backward compatibility)
+ */
+export const SWR_CONFIG = getSWRConfig({});
+
+/**
+ * Gets stale-while-revalidate enabled status from environment
+ * @param {Object} env - Worker environment object
+ * @returns {boolean} Whether stale-while-revalidate is enabled
+ */
+export function isStaleWhileRevalidateEnabled(env = {}) {
+  const envConfig = getEnvConfig(env);
+  return envConfig.features.staleWhileRevalidate;
+}
+
+/**
+ * Global master switch for stale-while-revalidate (default, can be overridden by env)
+ */
+export const STALE_WHILE_REVALIDATE_ENABLED = true;
 
 /**
  * Gets the total cache lifetime (maxAge + staleWhileRevalidate)
+ * @param {Object} env - Worker environment object (optional)
  * @returns {number} Total lifetime in seconds
  */
-export function getTotalCacheLifetime() {
-  return SWR_CONFIG.maxAge + SWR_CONFIG.staleWhileRevalidate;
+export function getTotalCacheLifetime(env = {}) {
+  const config = getSWRConfig(env);
+  return config.maxAge + config.staleWhileRevalidate;
 }
 

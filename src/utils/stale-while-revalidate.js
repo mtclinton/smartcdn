@@ -4,7 +4,7 @@
  * Functions for implementing stale-while-revalidate caching pattern
  */
 
-import { STALE_WHILE_REVALIDATE_ENABLED, SWR_CONFIG, getTotalCacheLifetime } from '../config/stale-while-revalidate.js';
+import { isStaleWhileRevalidateEnabled, getSWRConfig, STALE_WHILE_REVALIDATE_ENABLED, SWR_CONFIG, getTotalCacheLifetime } from '../config/stale-while-revalidate.js';
 import { buildOriginUrl } from './geo-routing.js';
 
 /**
@@ -39,14 +39,16 @@ export function shouldUseStaleWhileRevalidate(request, pathname) {
  * Checks if a cached response is stale
  * @param {Response} cachedResponse - The cached response
  * @param {number} maxAge - Maximum age in seconds (default from config)
+ * @param {Object} env - Worker environment object (optional)
  * @returns {boolean} True if response is stale
  */
-export function isCachedResponseStale(cachedResponse, maxAge = null) {
+export function isCachedResponseStale(cachedResponse, maxAge = null, env = {}) {
   if (!cachedResponse) {
     return true;
   }
 
-  const age = maxAge || SWR_CONFIG.maxAge;
+  const config = getSWRConfig(env);
+  const age = maxAge || config.maxAge;
   
   // Check Cache-Control header for max-age
   const cacheControl = cachedResponse.headers.get('Cache-Control');
@@ -94,32 +96,34 @@ function isResponseOlderThan(response, ageSeconds) {
 /**
  * Checks if stale content can still be served (within stale-while-revalidate window)
  * @param {Response} cachedResponse - The cached response
+ * @param {Object} env - Worker environment object (optional)
  * @returns {boolean} True if stale content can be served
  */
-export function canServeStaleContent(cachedResponse) {
+export function canServeStaleContent(cachedResponse, env = {}) {
   if (!cachedResponse) {
     return false;
   }
 
-  const totalLifetime = getTotalCacheLifetime();
+  const totalLifetime = getTotalCacheLifetime(env);
   return !isResponseOlderThan(cachedResponse, totalLifetime);
 }
 
 /**
  * Determines cache freshness status
  * @param {Response} cachedResponse - The cached response
+ * @param {Object} env - Worker environment object (optional)
  * @returns {string} 'fresh', 'stale', or 'expired'
  */
-export function getCacheFreshnessStatus(cachedResponse) {
+export function getCacheFreshnessStatus(cachedResponse, env = {}) {
   if (!cachedResponse) {
     return 'expired';
   }
 
-  if (!isCachedResponseStale(cachedResponse)) {
+  if (!isCachedResponseStale(cachedResponse, null, env)) {
     return 'fresh';
   }
 
-  if (canServeStaleContent(cachedResponse)) {
+  if (canServeStaleContent(cachedResponse, env)) {
     return 'stale';
   }
 
@@ -182,8 +186,10 @@ export function buildRevalidationUrl(finalUrl, geoRoutingInfo) {
  * @param {Headers} headers - Response headers
  * @param {string} freshnessStatus - Cache freshness status ('fresh', 'stale', 'expired')
  * @param {boolean} isRevalidating - Whether background revalidation is happening
+ * @param {Object} env - Worker environment object (optional)
  */
-export function addSWRHeaders(headers, freshnessStatus, isRevalidating = false) {
+export function addSWRHeaders(headers, freshnessStatus, isRevalidating = false, env = {}) {
+  const config = getSWRConfig(env);
   headers.set('X-Cache-Freshness', freshnessStatus);
   
   if (isRevalidating) {
@@ -195,13 +201,13 @@ export function addSWRHeaders(headers, freshnessStatus, isRevalidating = false) 
   if (existingCacheControl) {
     // Append stale-while-revalidate if not already present
     if (!existingCacheControl.includes('stale-while-revalidate')) {
-      const swrValue = SWR_CONFIG.staleWhileRevalidate;
+      const swrValue = config.staleWhileRevalidate;
       headers.set('Cache-Control', `${existingCacheControl}, stale-while-revalidate=${swrValue}`);
     }
   } else {
     // Set Cache-Control with stale-while-revalidate
-    const maxAge = SWR_CONFIG.maxAge;
-    const swrValue = SWR_CONFIG.staleWhileRevalidate;
+    const maxAge = config.maxAge;
+    const swrValue = config.staleWhileRevalidate;
     headers.set('Cache-Control', `max-age=${maxAge}, stale-while-revalidate=${swrValue}`);
   }
 }

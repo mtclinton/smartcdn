@@ -8,10 +8,19 @@ import { AB_TESTING_GLOBAL_ENABLED, AB_TESTS } from '../config/ab-tests.js';
 
 /**
  * Checks if A/B testing is globally enabled
- * @returns {boolean} True if A/B testing is enabled
+ * @param {Object} env - Worker environment object (optional)
+ * @param {boolean} featureFlagEnabled - Whether feature flag is enabled (optional, will check if not provided)
+ * @returns {Promise<boolean>} True if A/B testing is enabled
  */
-export function isABTestingEnabled() {
-  return AB_TESTING_GLOBAL_ENABLED;
+export async function isABTestingEnabled(env = {}, featureFlagEnabled = null) {
+  // Check feature flag if not provided
+  if (featureFlagEnabled === null) {
+    const { isABTestingEnabled: checkABTesting } = await import('./feature-flags.js');
+    featureFlagEnabled = await checkABTesting(env);
+  }
+  
+  // Feature flag takes precedence over config
+  return featureFlagEnabled && AB_TESTING_GLOBAL_ENABLED;
 }
 
 /**
@@ -251,7 +260,12 @@ export function getActiveTests(pathname) {
  * @param {string} pathname - The request pathname
  * @returns {Object|null} The highest priority test or null
  */
-export function getPrimaryTest(pathname) {
+export async function getPrimaryTest(pathname, env = {}, featureFlagEnabled = null) {
+  const enabled = await isABTestingEnabled(env, featureFlagEnabled);
+  if (!enabled) {
+    return null;
+  }
+  
   const activeTests = getActiveTests(pathname);
   return activeTests.length > 0 ? activeTests[0] : null;
 }

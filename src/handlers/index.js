@@ -28,7 +28,7 @@ import { getRateLimitInfo, addRateLimitHeaders } from '../utils/rate-limiting.js
 /**
  * Handles GET requests with caching, A/B testing, and image optimization
  */
-export async function handleGET(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
+export async function handleGET(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, env, ctx) {
   // Create timing tracker for this request
   const timing = createTimingTracker();
 
@@ -85,10 +85,10 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     const cacheLookupTime = timing.getCacheLookupTime();
     
     // Check if we should use stale-while-revalidate
-    const useSWR = shouldUseStaleWhileRevalidate(request, url.pathname);
-    const freshnessStatus = useSWR ? getCacheFreshnessStatus(cachedResponse) : 'fresh';
-    const isStale = useSWR && isCachedResponseStale(cachedResponse);
-    const canServeStale = useSWR && canServeStaleContent(cachedResponse);
+    const useSWR = shouldUseStaleWhileRevalidate(request, url.pathname, env);
+    const freshnessStatus = useSWR ? getCacheFreshnessStatus(cachedResponse, env) : 'fresh';
+    const isStale = useSWR && isCachedResponseStale(cachedResponse, null, env);
+    const canServeStale = useSWR && canServeStaleContent(cachedResponse, env);
     
     // If stale but can serve stale content, serve it and revalidate in background
     if (isStale && canServeStale) {
@@ -122,7 +122,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
       const response = buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, timing, false, cacheStatus);
       
       // Add SWR headers
-      addSWRHeaders(response.headers, freshnessStatus, true);
+      addSWRHeaders(response.headers, freshnessStatus, true, env);
       
       // Structured logging for stale cache hit
       logRequest({
@@ -181,12 +181,12 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
       
       // Add SWR headers (fresh content)
       if (useSWR) {
-        addSWRHeaders(response.headers, freshnessStatus, false);
+        addSWRHeaders(response.headers, freshnessStatus, false, env);
       }
       
       // Add rate limit headers
-      const freshRateLimitInfo = await getRateLimitInfo(request, cache);
-      addRateLimitHeaders(response.headers, freshRateLimitInfo);
+      const freshRateLimitInfo = await getRateLimitInfo(request, cache, env);
+      addRateLimitHeaders(response.headers, freshRateLimitInfo, env);
       
       // Structured logging for cache hit
       logRequest({
@@ -297,7 +297,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   // Apply cache headers
   applyCacheHeaders(originResponse, finalUrl.pathname, responseHeaders);
 
-  const ttlSeconds = getCacheTTL(finalUrl.pathname);
+  const ttlSeconds = getCacheTTL(finalUrl.pathname, env);
   console.log(`Cache TTL: ${ttlSeconds} seconds (${Math.round(ttlSeconds / 60)} minutes)`);
 
   let response = new Response(responseBody, {
@@ -362,8 +362,8 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   addTimingHeaders(response.headers, timing, cacheStatus);
   
   // Add SWR headers if applicable (for fresh responses)
-  if (!shouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname)) {
-    addSWRHeaders(response.headers, 'fresh', false);
+  if (!shouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname, env)) {
+    addSWRHeaders(response.headers, 'fresh', false, env);
   }
   
   // Add bypass header if applicable
@@ -408,7 +408,7 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
 /**
  * Handles HEAD requests (similar to GET but no body)
  */
-export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx) {
+export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptParams, testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, env, ctx) {
   // Create timing tracker for this request
   const headTiming = createTimingTracker();
 
@@ -459,10 +459,10 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   
   if (cachedHeadResponse) {
     // Check if we should use stale-while-revalidate
-    const headUseSWR = shouldUseStaleWhileRevalidate(request, url.pathname);
-    const headFreshnessStatus = headUseSWR ? getCacheFreshnessStatus(cachedHeadResponse) : 'fresh';
-    const headIsStale = headUseSWR && isCachedResponseStale(cachedHeadResponse);
-    const headCanServeStale = headUseSWR && canServeStaleContent(cachedHeadResponse);
+    const headUseSWR = shouldUseStaleWhileRevalidate(request, url.pathname, env);
+    const headFreshnessStatus = headUseSWR ? getCacheFreshnessStatus(cachedHeadResponse, env) : 'fresh';
+    const headIsStale = headUseSWR && isCachedResponseStale(cachedHeadResponse, null, env);
+    const headCanServeStale = headUseSWR && canServeStaleContent(cachedHeadResponse, env);
     
     // If stale but can serve stale content, serve it and revalidate in background
     if (headIsStale && headCanServeStale) {
@@ -492,11 +492,11 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
       const response = buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, headTiming, true, headCacheStatus);
       
       // Add SWR headers
-      addSWRHeaders(response.headers, headFreshnessStatus, true);
+      addSWRHeaders(response.headers, headFreshnessStatus, true, env);
       
       // Add rate limit headers
-      const headStaleRateLimitInfo = await getRateLimitInfo(request, headCache);
-      addRateLimitHeaders(response.headers, headStaleRateLimitInfo);
+      const headStaleRateLimitInfo = await getRateLimitInfo(request, headCache, env);
+      addRateLimitHeaders(response.headers, headStaleRateLimitInfo, env);
       
       return response;
     } else if (!headIsStale) {
@@ -644,13 +644,13 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   addTimingHeaders(headResponse.headers, headTiming, headCacheStatus);
   
   // Add SWR headers if applicable (for fresh responses)
-  if (!headShouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname)) {
-    addSWRHeaders(headResponse.headers, 'fresh', false);
+  if (!headShouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname, env)) {
+    addSWRHeaders(headResponse.headers, 'fresh', false, env);
   }
   
   // Add rate limit headers
-  const headRateLimitInfo = await getRateLimitInfo(request, headCache);
-  addRateLimitHeaders(headResponse.headers, headRateLimitInfo);
+  const headRateLimitInfo = await getRateLimitInfo(request, headCache, env);
+  addRateLimitHeaders(headResponse.headers, headRateLimitInfo, env);
   
   // Add bypass header if applicable
   if (headShouldBypass && headBypassInfo) {

@@ -4,6 +4,8 @@
  * Functions for cache TTL calculation, cache headers, and cache key generation
  */
 
+import { getEnvConfig } from './env-config.js';
+
 /**
  * Checks if a pathname represents an image file
  * @param {string} pathname - The request pathname
@@ -21,14 +23,19 @@ function isImagePath(pathname) {
 /**
  * Determines cache TTL in seconds based on file extension or path
  * @param {string} pathname - The request pathname
+ * @param {Object} env - Worker environment object (optional)
  * @returns {number} Cache TTL in seconds
  */
-export function getCacheTTL(pathname) {
+export function getCacheTTL(pathname, env = {}) {
+  // Get cache TTL configuration from environment
+  const envConfig = getEnvConfig(env);
+  const cacheTTL = envConfig.cacheTTL;
+  
   const lowerPath = pathname.toLowerCase();
   
-  // API responses: 5 minutes
+  // API responses
   if (lowerPath.startsWith('/api/')) {
-    return 5 * 60; // 5 minutes
+    return cacheTTL.api;
   }
   
   // Get file extension
@@ -36,31 +43,31 @@ export function getCacheTTL(pathname) {
   if (lastDot === -1) {
     // No extension, check if it's HTML-like
     if (lowerPath.endsWith('/') || lowerPath === '' || !lowerPath.includes('.')) {
-      return 60 * 60; // 1 hour (treat as HTML)
+      return cacheTTL.html;
     }
-    return 24 * 60 * 60; // Default: 1 day
+    return cacheTTL.default;
   }
   
   const extension = lowerPath.substring(lastDot + 1);
   
-  // Images: 30 days
+  // Images
   const imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg', 'ico'];
   if (imageExtensions.includes(extension)) {
-    return 30 * 24 * 60 * 60; // 30 days
+    return cacheTTL.images;
   }
   
-  // CSS/JS: 7 days
+  // CSS/JS
   if (extension === 'css' || extension === 'js') {
-    return 7 * 24 * 60 * 60; // 7 days
+    return cacheTTL.cssJs;
   }
   
-  // HTML: 1 hour
+  // HTML
   if (extension === 'html' || extension === 'htm') {
-    return 60 * 60; // 1 hour
+    return cacheTTL.html;
   }
   
-  // Default: 1 day
-  return 24 * 60 * 60; // 1 day
+  // Default
+  return cacheTTL.default;
 }
 
 /**

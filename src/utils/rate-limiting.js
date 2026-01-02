@@ -4,7 +4,7 @@
  * Functions for implementing rate limiting per IP address
  */
 
-import { RATE_LIMITING_ENABLED, RATE_LIMIT_CONFIG } from '../config/rate-limiting.js';
+import { isRateLimitingEnabled, getRateLimitConfig, RATE_LIMITING_ENABLED, RATE_LIMIT_CONFIG } from '../config/rate-limiting.js';
 import { getClientIP } from './request.js';
 
 /**
@@ -87,24 +87,39 @@ async function setRateLimitData(ip, data, cache = null, ctx = null) {
  * Checks if rate limiting should be applied to a request
  * @param {Request} request - The incoming request
  * @param {string} pathname - Request pathname
- * @returns {boolean} True if rate limiting should be applied
+ * @param {Object} env - Worker environment object (optional)
+ * @param {boolean} featureFlagEnabled - Whether feature flag is enabled (optional, will check if not provided)
+ * @returns {Promise<boolean>} True if rate limiting should be applied
  */
-export function shouldApplyRateLimit(request, pathname) {
-  if (!RATE_LIMITING_ENABLED) {
+export async function shouldApplyRateLimit(request, pathname, env = {}, featureFlagEnabled = null) {
+  // Check feature flag if not provided
+  if (featureFlagEnabled === null) {
+    const { isRateLimitingEnabled: checkRateLimiting } = await import('./feature-flags.js');
+    featureFlagEnabled = await checkRateLimiting(env);
+  }
+  
+  // Feature flag takes precedence
+  if (!featureFlagEnabled) {
+    return false;
+  }
+  
+  if (!isRateLimitingEnabled(env)) {
     return false;
   }
 
+  const rules = getRateLimitConfig(env);
+
   // Check if path is disabled
-  for (const disabledPath of RATE_LIMIT_CONFIG.disabledForPaths) {
+  for (const disabledPath of rules.disabledForPaths) {
     if (pathname.startsWith(disabledPath)) {
       return false;
     }
   }
 
   // Check if path is enabled (if enabledForPaths is not empty)
-  if (RATE_LIMIT_CONFIG.enabledForPaths.length > 0) {
+  if (rules.enabledForPaths.length > 0) {
     let isEnabled = false;
-    for (const enabledPath of RATE_LIMIT_CONFIG.enabledForPaths) {
+    for (const enabledPath of rules.enabledForPaths) {
       if (pathname.startsWith(enabledPath)) {
         isEnabled = true;
         break;
@@ -116,8 +131,8 @@ export function shouldApplyRateLimit(request, pathname) {
   }
 
   // Check custom function
-  if (typeof RATE_LIMIT_CONFIG.shouldRateLimit === 'function') {
-    if (!RATE_LIMIT_CONFIG.shouldRateLimit(request, pathname)) {
+  if (typeof rules.shouldRateLimit === 'function') {
+    if (!rules.shouldRateLimit(request, pathname)) {
       return false;
     }
   }
@@ -129,12 +144,14 @@ export function shouldApplyRateLimit(request, pathname) {
  * Checks rate limit for an IP address
  * @param {string} ip - IP address
  * @param {Cache} cache - Cache instance (optional)
+ * @param {Object} env - Worker environment object (optional)
  * @returns {Promise<Object>} Rate limit check result
  */
-export async function checkRateLimit(ip, cache = null) {
+export async function checkRateLimit(ip, cache = null, env = {}) {
+  const config = getRateLimitConfig(env);
   const now = Date.now();
-  const windowMs = RATE_LIMIT_CONFIG.windowSeconds * 1000;
-  const maxRequests = RATE_LIMIT_CONFIG.maxRequests;
+  const windowMs = config.windowSeconds * 1000;
+  const maxRequests = config.maxRequests;
 
   // Get current rate limit data
   const rateLimitData = await getRateLimitData(ip, cache);
@@ -202,13 +219,15 @@ export async function checkRateLimit(ip, cache = null) {
  * Gets rate limit information for a request (without incrementing counter)
  * @param {Request} request - The incoming request
  * @param {Cache} cache - Cache instance (optional)
+ * @param {Object} env - Worker environment object (optional)
  * @returns {Promise<Object>} Rate limit information
  */
-export async function getRateLimitInfo(request, cache = null) {
+export async function getRateLimitInfo(request, cache = null, env = {}) {
+  const config = getRateLimitConfig(env);
   const ip = getClientIP(request);
   const now = Date.now();
-  const windowMs = RATE_LIMIT_CONFIG.windowSeconds * 1000;
-  const maxRequests = RATE_LIMIT_CONFIG.maxRequests;
+  const windowMs = config.windowSeconds * 1000;
+  const maxRequests = config.maxRequests;
 
   // Get current rate limit data (without incrementing)
   const rateLimitData = await getRateLimitData(ip, cache);
@@ -249,20 +268,22 @@ export async function getRateLimitInfo(request, cache = null) {
 /**
  * Creates a 429 Too Many Requests response
  * @param {number} retryAfter - Seconds until retry is allowed
+ * @param {Object} env - Worker environment object (optional)
  * @returns {Response} 429 response
  */
-export function createRateLimitResponse(retryAfter) {
+export function createRateLimitResponse(retryAfter, env = {}) {
+  const config = getRateLimitConfig(env);
   const headers = new Headers({
     'Content-Type': 'application/json',
     'Retry-After': retryAfter.toString(),
-    'X-RateLimit-Limit': RATE_LIMIT_CONFIG.maxRequests.toString(),
+    'X-RateLimit-Limit': config.maxRequests.toString(),
     'X-RateLimit-Remaining': '0',
     'X-RateLimit-Reset': new Date(Date.now() + retryAfter * 1000).toISOString(),
   });
 
   const body = JSON.stringify({
     error: 'Too Many Requests',
-    message: `Rate limit exceeded. Maximum ${RATE_LIMIT_CONFIG.maxRequests} requests per ${RATE_LIMIT_CONFIG.windowSeconds} seconds.`,
+    message: `Rate limit exceeded. Maximum ${config.maxRequests} requests per ${config.windowSeconds} seconds.`,
     retryAfter: retryAfter,
   });
 
@@ -277,9 +298,11 @@ export function createRateLimitResponse(retryAfter) {
  * Adds rate limit headers to response
  * @param {Headers} headers - Response headers
  * @param {Object} rateLimitInfo - Rate limit information
+ * @param {Object} env - Worker environment object (optional)
  */
-export function addRateLimitHeaders(headers, rateLimitInfo) {
-  headers.set('X-RateLimit-Limit', RATE_LIMIT_CONFIG.maxRequests.toString());
+export function addRateLimitHeaders(headers, rateLimitInfo, env = {}) {
+  const config = getRateLimitConfig(env);
+  headers.set('X-RateLimit-Limit', config.maxRequests.toString());
   headers.set('X-RateLimit-Remaining', rateLimitInfo.remaining.toString());
   headers.set('X-RateLimit-Reset', new Date(rateLimitInfo.resetTime).toISOString());
   

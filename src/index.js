@@ -26,6 +26,7 @@ import { getGeoRoutingInfo } from './utils/geo-routing.js';
 import { getRegionContentForRequest, buildRegionContentUrl } from './utils/region-content.js';
 import { shouldApplyRateLimit, checkRateLimit, getRateLimitInfo, createRateLimitResponse, addRateLimitHeaders } from './utils/rate-limiting.js';
 import { getClientIP } from './utils/request.js';
+import { isABTestingEnabled, isImageOptimizationEnabled, isGeoRoutingEnabled, isRateLimitingEnabled } from './utils/feature-flags.js';
 
 // Handlers
 import {
@@ -58,20 +59,26 @@ export default {
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
 
+      // Feature flags: Check if features are enabled
+      const abTestingEnabled = await isABTestingEnabled(env);
+      const imageOptimizationEnabled = await isImageOptimizationEnabled(env);
+      const geoRoutingEnabled = await isGeoRoutingEnabled(env);
+      const rateLimitingEnabled = await isRateLimitingEnabled(env);
+
       // Rate limiting: Check if request should be rate limited
-      if (shouldApplyRateLimit(request, url.pathname)) {
+      if (await shouldApplyRateLimit(request, url.pathname, env, rateLimitingEnabled)) {
         const cache = caches.default;
         const ip = getClientIP(request);
-        const rateLimitResult = await checkRateLimit(ip, cache);
+        const rateLimitResult = await checkRateLimit(ip, cache, env);
         
         if (!rateLimitResult.allowed) {
           console.log(`Rate limit exceeded for IP: ${ip} (${rateLimitResult.retryAfter}s until reset)`);
-          return createRateLimitResponse(rateLimitResult.retryAfter);
+          return createRateLimitResponse(rateLimitResult.retryAfter, env);
         }
       }
 
       // Geographic routing: Determine origin based on country
-      const geoRoutingInfo = getGeoRoutingInfo(request);
+      const geoRoutingInfo = await getGeoRoutingInfo(request, env, geoRoutingEnabled);
       console.log('Geographic Routing:', JSON.stringify(geoRoutingInfo, null, 2));
 
       // Region-specific content: Check if path should serve region-specific content
@@ -87,13 +94,13 @@ export default {
 
       // Content negotiation for images
       let formatNegotiation = null;
-      if (isImagePath(url.pathname)) {
+      if (imageOptimizationEnabled && isImagePath(url.pathname)) {
         const acceptInfo = parseAcceptHeader(request);
         formatNegotiation = negotiateImageFormat(url.pathname, acceptInfo);
       }
 
       // A/B Testing: Get primary test and assign variant
-      const primaryTest = getPrimaryTest(url.pathname);
+      const primaryTest = await getPrimaryTest(url.pathname, env, abTestingEnabled);
       let testInfo = null;
       let routingUrl = url;
       let routingInfo = null;
@@ -139,7 +146,7 @@ export default {
       let imageUrl = contentUrl;
       let shouldResize = false;
 
-      if (isImagePath(url.pathname)) {
+      if (imageOptimizationEnabled && isImagePath(url.pathname)) {
         resizeParams = parseImageResizeParams(url, deviceInfo, imageOptParams);
         shouldResize = shouldResizeImage(url, deviceInfo, imageOptParams);
 
@@ -193,13 +200,13 @@ export default {
         case 'GET':
           return await handleGET(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, env, ctx
           );
 
         case 'HEAD':
           return await handleHEAD(
             request, url, imageUrl, deviceInfo, imageOptParams,
-            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, ctx
+            testInfo, routingInfo, formatNegotiation, resizeParams, shouldResize, geoRoutingInfo, regionContentInfo, env, ctx
           );
 
         case 'POST':
