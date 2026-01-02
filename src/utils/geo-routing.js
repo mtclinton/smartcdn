@@ -4,7 +4,7 @@
  * Functions for determining the appropriate origin server based on geographic location
  */
 
-import { GEO_ROUTING_CONFIG, GEO_ROUTING_ENABLED } from '../config/geo-routing.js';
+import { getGeoRoutingConfig, isGeoRoutingEnabled, GEO_ROUTING_ENABLED } from '../config/geo-routing.js';
 
 /**
  * Country to Region Mapping
@@ -146,13 +146,15 @@ export function getRegionForCountry(countryCode) {
 /**
  * Gets the origin URL for a given region
  * @param {string} region - Region name ('north-america', 'europe', 'asia', 'default')
+ * @param {Object} env - Worker environment object (optional)
  * @returns {string} Origin URL
  */
-export function getOriginForRegion(region) {
-  const regionConfig = GEO_ROUTING_CONFIG[region];
+export function getOriginForRegion(region, env = {}) {
+  const config = getGeoRoutingConfig(env);
+  const regionConfig = config[region];
   if (!regionConfig) {
     // Fallback to default if region not found
-    return GEO_ROUTING_CONFIG.default.origin;
+    return config.default.origin;
   }
   return regionConfig.origin;
 }
@@ -160,29 +162,43 @@ export function getOriginForRegion(region) {
 /**
  * Determines the appropriate origin URL based on country code
  * @param {string} countryCode - ISO 3166-1 alpha-2 country code from request.cf.country
+ * @param {Object} env - Worker environment object (optional)
  * @returns {string} Origin URL for the region
  */
-export function getOriginForCountry(countryCode) {
-  if (!GEO_ROUTING_ENABLED) {
-    return GEO_ROUTING_CONFIG.default.origin;
+export function getOriginForCountry(countryCode, env = {}) {
+  if (!isGeoRoutingEnabled(env)) {
+    const config = getGeoRoutingConfig(env);
+    return config.default.origin;
   }
   
   const region = getRegionForCountry(countryCode);
-  return getOriginForRegion(region);
+  return getOriginForRegion(region, env);
 }
 
 /**
  * Gets geographic routing information for a request
  * @param {Request} request - The incoming request
+ * @param {Object} env - Worker environment object (optional)
+ * @param {boolean} featureFlagEnabled - Whether feature flag is enabled (optional, will check if not provided)
  * @returns {Object} Geographic routing information
  */
-export function getGeoRoutingInfo(request) {
-  if (!GEO_ROUTING_ENABLED) {
+export async function getGeoRoutingInfo(request, env = {}, featureFlagEnabled = null) {
+  // Check feature flag if not provided
+  if (featureFlagEnabled === null) {
+    const { isGeoRoutingEnabled: checkGeoRouting } = await import('./feature-flags.js');
+    featureFlagEnabled = await checkGeoRouting(env);
+  }
+  
+  const configEnabled = isGeoRoutingEnabled(env);
+  const config = getGeoRoutingConfig(env);
+  
+  // Feature flag takes precedence over config
+  if (!featureFlagEnabled || !configEnabled) {
     return {
       enabled: false,
       country: null,
       region: 'default',
-      origin: GEO_ROUTING_CONFIG.default.origin,
+      origin: config.default.origin,
     };
   }
   
@@ -190,7 +206,7 @@ export function getGeoRoutingInfo(request) {
   // Note: In Cloudflare Workers, request.cf.country is available
   const country = request.cf?.country || null;
   const region = getRegionForCountry(country);
-  const origin = getOriginForRegion(region);
+  const origin = getOriginForRegion(region, env);
   
   return {
     enabled: true,

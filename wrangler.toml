@@ -2,4 +2,95 @@ name = "smartcdn"
 main = "src/index.js"
 compatibility_date = "2025-12-29"
 
+# Development environment (default)
+[env.development]
+name = "smartcdn-dev"
 
+[env.development.vars]
+ENVIRONMENT = "development"
+# Geographic Routing Origins
+GEO_ORIGIN_NA = "https://dev-us-origin.example.com"
+GEO_ORIGIN_EU = "https://dev-eu-origin.example.com"
+GEO_ORIGIN_ASIA = "https://dev-asia-origin.example.com"
+GEO_ORIGIN_DEFAULT = "https://dev-global-origin.example.com"
+# Cache TTLs (in seconds)
+CACHE_TTL_IMAGES = "2592000"  # 30 days
+CACHE_TTL_CSS_JS = "604800"   # 7 days
+CACHE_TTL_HTML = "3600"       # 1 hour
+CACHE_TTL_API = "300"         # 5 minutes
+CACHE_TTL_DEFAULT = "86400"   # 1 day
+# Feature Flags
+FEATURE_AB_TESTING = "true"
+FEATURE_GEO_ROUTING = "true"
+FEATURE_REGION_CONTENT = "true"
+FEATURE_RATE_LIMITING = "false"
+FEATURE_STALE_WHILE_REVALIDATE = "true"
+FEATURE_CACHE_BYPASS = "true"
+# Rate Limiting
+RATE_LIMIT_MAX_REQUESTS = "1000"  # Higher limit for dev
+RATE_LIMIT_WINDOW_SECONDS = "60"
+# Stale-While-Revalidate
+SWR_MAX_AGE = "300"              # 5 minutes (shorter for dev)
+SWR_STALE_WHILE_REVALIDATE = "3600"  # 1 hour
+
+# Staging environment
+[env.staging]
+name = "smartcdn-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+# Geographic Routing Origins
+GEO_ORIGIN_NA = "https://staging-us-origin.example.com"
+GEO_ORIGIN_EU = "https://staging-eu-origin.example.com"
+GEO_ORIGIN_ASIA = "https://staging-asia-origin.example.com"
+GEO_ORIGIN_DEFAULT = "https://staging-global-origin.example.com"
+# Cache TTLs (in seconds)
+CACHE_TTL_IMAGES = "2592000"  # 30 days
+CACHE_TTL_CSS_JS = "604800"   # 7 days
+CACHE_TTL_HTML = "1800"       # 30 minutes (shorter for staging)
+CACHE_TTL_API = "300"         # 5 minutes
+CACHE_TTL_DEFAULT = "86400"   # 1 day
+# Feature Flags
+FEATURE_AB_TESTING = "true"
+FEATURE_GEO_ROUTING = "true"
+FEATURE_REGION_CONTENT = "true"
+FEATURE_RATE_LIMITING = "true"
+FEATURE_STALE_WHILE_REVALIDATE = "true"
+FEATURE_CACHE_BYPASS = "true"
+# Rate Limiting
+RATE_LIMIT_MAX_REQUESTS = "200"  # Moderate limit for staging
+RATE_LIMIT_WINDOW_SECONDS = "60"
+# Stale-While-Revalidate
+SWR_MAX_AGE = "1800"             # 30 minutes
+SWR_STALE_WHILE_REVALIDATE = "7200"  # 2 hours
+
+# Production environment
+[env.production]
+name = "smartcdn"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+# Geographic Routing Origins
+GEO_ORIGIN_NA = "https://us-origin.example.com"
+GEO_ORIGIN_EU = "https://eu-origin.example.com"
+GEO_ORIGIN_ASIA = "https://asia-origin.example.com"
+GEO_ORIGIN_DEFAULT = "https://global-origin.example.com"
+# Cache TTLs (in seconds)
+CACHE_TTL_IMAGES = "2592000"  # 30 days
+CACHE_TTL_CSS_JS = "604800"   # 7 days
+CACHE_TTL_HTML = "3600"       # 1 hour
+CACHE_TTL_API = "300"         # 5 minutes
+CACHE_TTL_DEFAULT = "86400"   # 1 day
+# Feature Flags
+FEATURE_AB_TESTING = "true"
+FEATURE_GEO_ROUTING = "true"
+FEATURE_REGION_CONTENT = "true"
+FEATURE_RATE_LIMITING = "true"
+FEATURE_STALE_WHILE_REVALIDATE = "true"
+FEATURE_CACHE_BYPASS = "true"
+# Rate Limiting
+RATE_LIMIT_MAX_REQUESTS = "100"  # Production limit
+RATE_LIMIT_WINDOW_SECONDS = "60"
+# Stale-While-Revalidate
+SWR_MAX_AGE = "3600"             # 1 hour
+SWR_STALE_WHILE_REVALIDATE = "86400"  # 24 hours
