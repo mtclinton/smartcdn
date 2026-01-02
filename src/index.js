@@ -192,13 +192,13 @@ export default {
           return await handlePOST(request, deviceInfo, testInfo);
 
         case 'PUT':
-          return handlePUT(deviceInfo, testInfo);
+          return handlePUT(request, deviceInfo, testInfo);
 
         case 'DELETE':
-          return handleDELETE(deviceInfo, testInfo);
+          return handleDELETE(request, deviceInfo, testInfo);
 
         case 'PATCH':
-          return handlePATCH(deviceInfo, testInfo);
+          return handlePATCH(request, deviceInfo, testInfo);
 
         case 'OPTIONS':
           return handleOPTIONS();
@@ -216,6 +216,22 @@ export default {
       // Error handling
       console.error('Error processing request:', error);
       console.error('Error stack:', error.stack);
+
+      // Log error
+      try {
+        const { logError } = await import('./utils/logging.js');
+        logError({
+          requestUrl: request.url,
+          method: request.method,
+          error: error,
+          context: {
+            pathname: url?.pathname || 'unknown',
+          },
+        });
+      } catch (logError) {
+        // If logging fails, continue without logging
+        console.warn('Failed to log error:', logError);
+      }
 
       return new Response(`Internal Server Error: ${error.message}`, {
         status: 500,
