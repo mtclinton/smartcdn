@@ -13,6 +13,17 @@ import { buildOriginUrl } from '../utils/geo-routing.js';
 import { createTimingTracker, formatTiming } from '../utils/timing.js';
 import { isRequestCacheable, isResponseCacheable, determineCacheStatus, recordCacheEvent } from '../utils/cache-tracking.js';
 import { logRequest } from '../utils/logging.js';
+import { shouldBypassCache, getBypassReason } from '../utils/cache-bypass.js';
+import { 
+  shouldUseStaleWhileRevalidate, 
+  isCachedResponseStale, 
+  canServeStaleContent, 
+  getCacheFreshnessStatus,
+  revalidateCacheInBackground,
+  buildRevalidationUrl,
+  addSWRHeaders,
+} from '../utils/stale-while-revalidate.js';
+import { getRateLimitInfo, addRateLimitHeaders } from '../utils/rate-limiting.js';
 
 /**
  * Handles GET requests with caching, A/B testing, and image optimization
@@ -23,6 +34,10 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
 
   // Check if request is cacheable
   const requestCacheable = isRequestCacheable(request, 'GET');
+
+  // Check if cache should be bypassed
+  const bypassInfo = shouldBypassCache(request);
+  const shouldBypass = bypassInfo !== null;
 
   const cache = caches.default;
   const finalUrl = imageUrl; // imageUrl is the final URL after all transformations
@@ -56,64 +71,151 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     headers: request.headers,
   });
 
-  // Check cache with timing (only if request is cacheable)
+  // Check cache with timing (only if request is cacheable and not bypassed)
   let cachedResponse = null;
-  if (requestCacheable) {
+  if (requestCacheable && !shouldBypass) {
     timing.startCacheLookup();
     cachedResponse = await cache.match(cacheKey);
     timing.endCacheLookup();
+  } else if (shouldBypass) {
+    console.log(`Cache BYPASS: ${getBypassReason(bypassInfo)}`);
   }
   
   if (cachedResponse) {
     const cacheLookupTime = timing.getCacheLookupTime();
-    console.log(`Cache HIT for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
     
-    timing.endTotal();
-    const metrics = timing.getMetrics();
-    console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
+    // Check if we should use stale-while-revalidate
+    const useSWR = shouldUseStaleWhileRevalidate(request, url.pathname);
+    const freshnessStatus = useSWR ? getCacheFreshnessStatus(cachedResponse) : 'fresh';
+    const isStale = useSWR && isCachedResponseStale(cachedResponse);
+    const canServeStale = useSWR && canServeStaleContent(cachedResponse);
     
-    // Track cache event
-    const responseCacheable = isResponseCacheable(response);
-    const cacheStatus = determineCacheStatus(true, requestCacheable, responseCacheable);
-    recordCacheEvent({
-      status: cacheStatus,
-      path: url.pathname,
-      method: 'GET',
-      statusCode: response.status,
-      country: geoRoutingInfo?.country || null,
-      region: geoRoutingInfo?.region || null,
-      cacheLookupTime: timing.getCacheLookupTime(),
-      originFetchTime: null,
-      totalTime: timing.getTotalTime(),
-    });
-    
-    const response = buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, timing, false, cacheStatus);
-    
-    // Structured logging for cache hit
-    logRequest({
-      requestUrl: url.href,
-      method: 'GET',
-      country: geoRoutingInfo?.country || null,
-      deviceType: deviceInfo.deviceType,
-      abTestVariant: testInfo?.variant || null,
-      cacheStatus: cacheStatus,
-      responseTime: timing.getTotalTime(),
-      statusCode: response.status,
-      additionalData: {
+    // If stale but can serve stale content, serve it and revalidate in background
+    if (isStale && canServeStale) {
+      console.log(`Cache HIT (STALE) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms) - serving stale, revalidating in background`);
+      
+      // Trigger background revalidation
+      const revalidationUrl = buildRevalidationUrl(finalUrl, geoRoutingInfo);
+      ctx.waitUntil(
+        revalidateCacheInBackground(request, revalidationUrl, cacheKey, cache, geoRoutingInfo)
+      );
+      
+      timing.endTotal();
+      const metrics = timing.getMetrics();
+      console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
+      
+      // Track cache event
+      const responseCacheable = isResponseCacheable(cachedResponse);
+      const cacheStatus = determineCacheStatus(true, requestCacheable, responseCacheable);
+      recordCacheEvent({
+        status: cacheStatus,
         path: url.pathname,
+        method: 'GET',
+        statusCode: cachedResponse.status,
+        country: geoRoutingInfo?.country || null,
         region: geoRoutingInfo?.region || null,
         cacheLookupTime: timing.getCacheLookupTime(),
         originFetchTime: null,
-        testId: testInfo?.testId || null,
-        regionContent: regionContentInfo?.enabled ? {
-          mappingId: regionContentInfo.mappingId,
-          originalPath: regionContentInfo.originalPath,
-          contentPath: regionContentInfo.contentPath,
-        } : null,
-      },
-    });
-    
-    return response;
+        totalTime: timing.getTotalTime(),
+      });
+      
+      const response = buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, timing, false, cacheStatus);
+      
+      // Add SWR headers
+      addSWRHeaders(response.headers, freshnessStatus, true);
+      
+      // Structured logging for stale cache hit
+      logRequest({
+        requestUrl: url.href,
+        method: 'GET',
+        country: geoRoutingInfo?.country || null,
+        deviceType: deviceInfo.deviceType,
+        abTestVariant: testInfo?.variant || null,
+        cacheStatus: cacheStatus,
+        responseTime: timing.getTotalTime(),
+        statusCode: response.status,
+        additionalData: {
+          path: url.pathname,
+          region: geoRoutingInfo?.region || null,
+          cacheLookupTime: timing.getCacheLookupTime(),
+          originFetchTime: null,
+          testId: testInfo?.testId || null,
+          regionContent: regionContentInfo?.enabled ? {
+            mappingId: regionContentInfo.mappingId,
+            originalPath: regionContentInfo.originalPath,
+            contentPath: regionContentInfo.contentPath,
+          } : null,
+          staleWhileRevalidate: {
+            enabled: true,
+            freshnessStatus: freshnessStatus,
+            revalidating: true,
+          },
+        },
+      });
+      
+      return response;
+    } else if (!isStale) {
+      // Fresh cache hit
+      console.log(`Cache HIT (FRESH) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
+      
+      timing.endTotal();
+      const metrics = timing.getMetrics();
+      console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
+      
+      // Track cache event
+      const responseCacheable = isResponseCacheable(cachedResponse);
+      const cacheStatus = determineCacheStatus(true, requestCacheable, responseCacheable);
+      recordCacheEvent({
+        status: cacheStatus,
+        path: url.pathname,
+        method: 'GET',
+        statusCode: cachedResponse.status,
+        country: geoRoutingInfo?.country || null,
+        region: geoRoutingInfo?.region || null,
+        cacheLookupTime: timing.getCacheLookupTime(),
+        originFetchTime: null,
+        totalTime: timing.getTotalTime(),
+      });
+      
+      const response = buildCachedResponse(cachedResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, timing, false, cacheStatus);
+      
+      // Add SWR headers (fresh content)
+      if (useSWR) {
+        addSWRHeaders(response.headers, freshnessStatus, false);
+      }
+      
+      // Add rate limit headers
+      const freshRateLimitInfo = await getRateLimitInfo(request, cache);
+      addRateLimitHeaders(response.headers, freshRateLimitInfo);
+      
+      // Structured logging for cache hit
+      logRequest({
+        requestUrl: url.href,
+        method: 'GET',
+        country: geoRoutingInfo?.country || null,
+        deviceType: deviceInfo.deviceType,
+        abTestVariant: testInfo?.variant || null,
+        cacheStatus: cacheStatus,
+        responseTime: timing.getTotalTime(),
+        statusCode: response.status,
+        additionalData: {
+          path: url.pathname,
+          region: geoRoutingInfo?.region || null,
+          cacheLookupTime: timing.getCacheLookupTime(),
+          originFetchTime: null,
+          testId: testInfo?.testId || null,
+          regionContent: regionContentInfo?.enabled ? {
+            mappingId: regionContentInfo.mappingId,
+            originalPath: regionContentInfo.originalPath,
+            contentPath: regionContentInfo.contentPath,
+          } : null,
+        },
+      });
+      
+      return response;
+    }
+    // If stale and expired, fall through to fetch fresh content
+    console.log(`Cache HIT (EXPIRED) for: ${url.pathname} - fetching fresh content`);
   }
 
   const cacheLookupTime = timing.getCacheLookupTime();
@@ -218,9 +320,9 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     return conditionalCheck;
   }
 
-  // Cache the response (only if both request and response are cacheable)
+  // Cache the response (only if both request and response are cacheable and not bypassed)
   const responseCacheable = isResponseCacheable(response);
-  if (requestCacheable && responseCacheable) {
+  if (requestCacheable && responseCacheable && !shouldBypass) {
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
   }
   
@@ -230,8 +332,15 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   console.log('Timing Metrics:', JSON.stringify(metrics, null, 2));
   
   // Track cache event
+  // If bypassed, treat as BYPASS status
   const wasCached = cachedResponse !== null;
-  const cacheStatus = determineCacheStatus(wasCached, requestCacheable, responseCacheable);
+  let cacheStatus;
+  if (shouldBypass) {
+    cacheStatus = 'BYPASS';
+  } else {
+    cacheStatus = determineCacheStatus(wasCached, requestCacheable, responseCacheable);
+  }
+  
   recordCacheEvent({
     status: cacheStatus,
     path: url.pathname,
@@ -244,10 +353,25 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     totalTime: timing.getTotalTime(),
   });
   
-  console.log(`Cache Status: ${cacheStatus} (request cacheable: ${requestCacheable}, response cacheable: ${responseCacheable})`);
+  const cacheStatusMessage = shouldBypass 
+    ? `Cache Status: ${cacheStatus} (bypassed: ${getBypassReason(bypassInfo)})`
+    : `Cache Status: ${cacheStatus} (request cacheable: ${requestCacheable}, response cacheable: ${responseCacheable})`;
+  console.log(cacheStatusMessage);
   
   // Add timing headers with cache status
   addTimingHeaders(response.headers, timing, cacheStatus);
+  
+  // Add SWR headers if applicable (for fresh responses)
+  if (!shouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname)) {
+    addSWRHeaders(response.headers, 'fresh', false);
+  }
+  
+  // Add bypass header if applicable
+  if (shouldBypass && bypassInfo) {
+    response.headers.set('X-Cache-Bypass', 'true');
+    response.headers.set('X-Cache-Bypass-Reason', bypassInfo.reason);
+    response.headers.set('X-Cache-Bypass-Rule', bypassInfo.matchedRule);
+  }
   
   // Structured logging
   logRequest({
@@ -269,6 +393,11 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
         mappingId: regionContentInfo.mappingId,
         originalPath: regionContentInfo.originalPath,
         contentPath: regionContentInfo.contentPath,
+      } : null,
+      cacheBypass: shouldBypass ? {
+        reason: bypassInfo.reason,
+        matchedRule: bypassInfo.matchedRule,
+        description: bypassInfo.description,
       } : null,
     },
   });
@@ -318,15 +447,60 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     headers: request.headers,
   });
 
-  // Check cache with timing (only if request is cacheable)
+  // Check cache with timing (only if request is cacheable and not bypassed)
   let cachedHeadResponse = null;
-  if (headRequestCacheable) {
+  if (headRequestCacheable && !headShouldBypass) {
     headTiming.startCacheLookup();
     cachedHeadResponse = await headCache.match(headCacheKey);
     headTiming.endCacheLookup();
+  } else if (headShouldBypass) {
+    console.log(`Cache BYPASS (HEAD): ${getBypassReason(headBypassInfo)}`);
   }
   
   if (cachedHeadResponse) {
+    // Check if we should use stale-while-revalidate
+    const headUseSWR = shouldUseStaleWhileRevalidate(request, url.pathname);
+    const headFreshnessStatus = headUseSWR ? getCacheFreshnessStatus(cachedHeadResponse) : 'fresh';
+    const headIsStale = headUseSWR && isCachedResponseStale(cachedHeadResponse);
+    const headCanServeStale = headUseSWR && canServeStaleContent(cachedHeadResponse);
+    
+    // If stale but can serve stale content, serve it and revalidate in background
+    if (headIsStale && headCanServeStale) {
+      console.log(`Cache HIT (STALE) (HEAD) for: ${url.pathname} - serving stale, revalidating in background`);
+      
+      // Trigger background revalidation
+      const headRevalidationUrl = buildRevalidationUrl(headFinalUrl, geoRoutingInfo);
+      ctx.waitUntil(
+        revalidateCacheInBackground(request, headRevalidationUrl, headCacheKey, headCache, geoRoutingInfo)
+      );
+      
+      // Track cache event
+      const headResponseCacheable = isResponseCacheable(cachedHeadResponse);
+      const headCacheStatus = determineCacheStatus(true, headRequestCacheable, headResponseCacheable);
+      recordCacheEvent({
+        status: headCacheStatus,
+        path: url.pathname,
+        method: 'HEAD',
+        statusCode: cachedHeadResponse.status,
+        country: geoRoutingInfo?.country || null,
+        region: geoRoutingInfo?.region || null,
+        cacheLookupTime: headTiming.getCacheLookupTime(),
+        originFetchTime: null,
+        totalTime: headTiming.getTotalTime(),
+      });
+      
+      const response = buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, headTiming, true, headCacheStatus);
+      
+      // Add SWR headers
+      addSWRHeaders(response.headers, headFreshnessStatus, true);
+      
+      // Add rate limit headers
+      const headStaleRateLimitInfo = await getRateLimitInfo(request, headCache);
+      addRateLimitHeaders(response.headers, headStaleRateLimitInfo);
+      
+      return response;
+    } else if (!headIsStale) {
+      // Fresh cache hit
     const cacheLookupTime = headTiming.getCacheLookupTime();
     console.log(`Cache HIT (HEAD) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
     
@@ -428,9 +602,9 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     return headConditionalCheck;
   }
 
-  // Cache the response (only if both request and response are cacheable)
+  // Cache the response (only if both request and response are cacheable and not bypassed)
   const headResponseCacheable = isResponseCacheable(headResponse);
-  if (headRequestCacheable && headResponseCacheable) {
+  if (headRequestCacheable && headResponseCacheable && !headShouldBypass) {
     ctx.waitUntil(headCache.put(headCacheKey, headResponse.clone()));
   }
   
@@ -440,8 +614,15 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   console.log('Timing Metrics (HEAD):', JSON.stringify(metrics, null, 2));
   
   // Track cache event
+  // If bypassed, treat as BYPASS status
   const headWasCached = cachedHeadResponse !== null;
-  const headCacheStatus = determineCacheStatus(headWasCached, headRequestCacheable, headResponseCacheable);
+  let headCacheStatus;
+  if (headShouldBypass) {
+    headCacheStatus = 'BYPASS';
+  } else {
+    headCacheStatus = determineCacheStatus(headWasCached, headRequestCacheable, headResponseCacheable);
+  }
+  
   recordCacheEvent({
     status: headCacheStatus,
     path: url.pathname,
@@ -454,10 +635,29 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     totalTime: headTiming.getTotalTime(),
   });
   
-  console.log(`Cache Status (HEAD): ${headCacheStatus} (request cacheable: ${headRequestCacheable}, response cacheable: ${headResponseCacheable})`);
+  const headCacheStatusMessage = headShouldBypass
+    ? `Cache Status (HEAD): ${headCacheStatus} (bypassed: ${getBypassReason(headBypassInfo)})`
+    : `Cache Status (HEAD): ${headCacheStatus} (request cacheable: ${headRequestCacheable}, response cacheable: ${headResponseCacheable})`;
+  console.log(headCacheStatusMessage);
   
   // Add timing headers with cache status
   addTimingHeaders(headResponse.headers, headTiming, headCacheStatus);
+  
+  // Add SWR headers if applicable (for fresh responses)
+  if (!headShouldBypass && shouldUseStaleWhileRevalidate(request, url.pathname)) {
+    addSWRHeaders(headResponse.headers, 'fresh', false);
+  }
+  
+  // Add rate limit headers
+  const headRateLimitInfo = await getRateLimitInfo(request, headCache);
+  addRateLimitHeaders(headResponse.headers, headRateLimitInfo);
+  
+  // Add bypass header if applicable
+  if (headShouldBypass && headBypassInfo) {
+    headResponse.headers.set('X-Cache-Bypass', 'true');
+    headResponse.headers.set('X-Cache-Bypass-Reason', headBypassInfo.reason);
+    headResponse.headers.set('X-Cache-Bypass-Rule', headBypassInfo.matchedRule);
+  }
   
   // Structured logging
   logRequest({
@@ -475,6 +675,11 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
       cacheLookupTime: headTiming.getCacheLookupTime(),
       originFetchTime: headTiming.getOriginFetchTime(),
       testId: testInfo?.testId || null,
+      cacheBypass: headShouldBypass ? {
+        reason: headBypassInfo.reason,
+        matchedRule: headBypassInfo.matchedRule,
+        description: headBypassInfo.description,
+      } : null,
     },
   });
   

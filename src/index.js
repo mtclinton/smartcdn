@@ -24,6 +24,8 @@ import {
 import { getOrAssignVariantForTest } from './utils/variants.js';
 import { getGeoRoutingInfo } from './utils/geo-routing.js';
 import { getRegionContentForRequest, buildRegionContentUrl } from './utils/region-content.js';
+import { shouldApplyRateLimit, checkRateLimit, getRateLimitInfo, createRateLimitResponse, addRateLimitHeaders } from './utils/rate-limiting.js';
+import { getClientIP } from './utils/request.js';
 
 // Handlers
 import {
@@ -55,6 +57,18 @@ export default {
       const url = new URL(request.url);
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
+
+      // Rate limiting: Check if request should be rate limited
+      if (shouldApplyRateLimit(request, url.pathname)) {
+        const cache = caches.default;
+        const ip = getClientIP(request);
+        const rateLimitResult = await checkRateLimit(ip, cache);
+        
+        if (!rateLimitResult.allowed) {
+          console.log(`Rate limit exceeded for IP: ${ip} (${rateLimitResult.retryAfter}s until reset)`);
+          return createRateLimitResponse(rateLimitResult.retryAfter);
+        }
+      }
 
       // Geographic routing: Determine origin based on country
       const geoRoutingInfo = getGeoRoutingInfo(request);
