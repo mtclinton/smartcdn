@@ -11,7 +11,16 @@
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",
     "test:unit": "vitest --exclude test/integration.test.js",
-    "test:integration": "vitest test/integration.test.js --no-coverage"
+    "test:integration": "vitest test/integration.test.js --no-coverage",
+    "deploy:staging": "node scripts/deploy.js staging",
+    "deploy:production": "node scripts/deploy.js production",
+    "deploy": "node scripts/deploy.js",
+    "rollback:staging": "node scripts/rollback.js staging",
+    "rollback:production": "node scripts/rollback.js production",
+    "rollback": "node scripts/rollback.js",
+    "smoke:staging": "node scripts/smoke-tests.js staging",
+    "smoke:production": "node scripts/smoke-tests.js production",
+    "smoke": "node scripts/smoke-tests.js"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260101.0",
