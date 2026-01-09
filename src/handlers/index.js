@@ -5,7 +5,7 @@
  */
 
 import { generateCacheKey, handleConditionalRequest, applyCacheHeaders, getCacheTTL } from '../utils/cache.js';
-import { getContentType } from '../utils/request.js';
+import { getContentType, cleanHeadersForOrigin } from '../utils/request.js';
 import { isImagePath } from '../utils/image.js';
 import { addDeviceHeaders, addImageHeaders, addABTestHeaders, addGeoRoutingHeaders, addRegionContentHeaders, addTimingHeaders, getNegotiatedContentType } from '../utils/headers.js';
 import { setTestVariantCookie } from '../utils/variants.js';
@@ -238,12 +238,65 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
     console.log(logMessage);
     
     try {
-      // Create a new request to the origin, preserving method and headers
-      const originRequest = new Request(originUrl.href, {
-        method: request.method,
-        headers: request.headers,
-      });
-      originResponse = await fetch(originRequest);
+      // Priority 1: Try Service Binding (recommended for Worker-to-Worker communication)
+      if (env.ORIGIN) {
+        console.log('[DEBUG] Using service binding for Worker-to-Worker communication');
+        try {
+          // Service bindings allow direct Worker-to-Worker communication
+          // Create a new request for the service binding
+          const serviceRequest = new Request(finalUrl, {
+            method: request.method,
+            headers: request.headers,
+          });
+          originResponse = await env.ORIGIN.fetch(serviceRequest);
+          console.log(`[DEBUG] Service binding response status: ${originResponse.status}`);
+        } catch (sbError) {
+          console.error(`[DEBUG] Service binding failed: ${sbError.message}`);
+          // Fall through to HTTP fetch
+        }
+      }
+      
+      // Priority 2: HTTP fetch (fallback if service binding not available or failed)
+      if (!originResponse || (originResponse.status !== 200 && originResponse.status !== 304)) {
+        if (!originResponse) {
+          console.log('[DEBUG] Service binding returned no response, trying HTTP fetch');
+        } else {
+          console.log(`[DEBUG] Service binding returned ${originResponse.status}, trying HTTP fetch as fallback`);
+        }
+        const cleanedHeaders = cleanHeadersForOrigin(request.headers, originUrl.href);
+        const fetchUrl = originUrl.href;
+        
+        const httpResponse = await fetch(fetchUrl, {
+          method: request.method,
+          headers: cleanedHeaders,
+        });
+        
+        console.log(`[DEBUG] HTTP fetch response status: ${httpResponse.status}`);
+        
+        // Only use HTTP response if it's better than service binding response
+        if (!originResponse || (httpResponse.status === 200 && originResponse.status !== 200)) {
+          originResponse = httpResponse;
+        }
+      }
+      
+      // Follow redirects manually if needed (only for HTTP fetch, service binding handles redirects)
+      if (originResponse && originResponse.status >= 300 && originResponse.status < 400) {
+        const location = originResponse.headers.get('Location');
+        if (location) {
+          console.log(`[DEBUG] Following redirect to: ${location}`);
+          const cleanedHeaders = cleanHeadersForOrigin(request.headers, originUrl.href);
+          originResponse = await fetch(new URL(location, originUrl.origin).href, {
+            method: request.method,
+            headers: cleanedHeaders,
+          });
+        }
+      }
+      
+      if (originResponse) {
+        console.log(`[DEBUG] Final origin response status: ${originResponse.status}`);
+      } else {
+        console.log(`[DEBUG] No origin response available`);
+      }
       timing.endOriginFetch();
       const originFetchTime = timing.getOriginFetchTime();
       console.log(`Origin response status: ${originResponse.status} (fetch: ${formatTiming(originFetchTime)}ms)`);
@@ -290,8 +343,21 @@ export async function handleGET(request, url, imageUrl, deviceInfo, imageOptPara
   let responseStatus = 200;
   
   if (originResponse) {
+    // Use the origin response status and body
     responseStatus = originResponse.status;
-    responseBody = await originResponse.clone().text();
+    try {
+      responseBody = await originResponse.clone().text();
+      console.log(`[DEBUG] Using origin response: status=${responseStatus}, bodyLength=${responseBody.length}`);
+    } catch (bodyError) {
+      console.error(`[DEBUG] Error reading origin response body: ${bodyError.message}`);
+      responseStatus = 500;
+      responseBody = "Error reading origin response";
+    }
+  } else {
+    // No origin response at all
+    console.log('[DEBUG] No origin response available, using default');
+    responseStatus = 503;
+    responseBody = "Service temporarily unavailable - origin not responding";
   }
 
   // Apply cache headers
@@ -415,6 +481,10 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
   // Check if request is cacheable
   const headRequestCacheable = isRequestCacheable(request, 'HEAD');
 
+  // Check if cache should be bypassed
+  const headBypassInfo = shouldBypassCache(request);
+  const headShouldBypass = headBypassInfo !== null;
+
   const headCache = caches.default;
   const headFinalUrl = imageUrl;
   let headCacheKey = generateCacheKey(request, headFinalUrl);
@@ -501,30 +571,33 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
       return response;
     } else if (!headIsStale) {
       // Fresh cache hit
-    const cacheLookupTime = headTiming.getCacheLookupTime();
-    console.log(`Cache HIT (HEAD) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
-    
-    headTiming.endTotal();
-    const metrics = headTiming.getMetrics();
-    console.log('Timing Metrics (HEAD):', JSON.stringify(metrics, null, 2));
-    
-    // Track cache event
-    const headResponseCacheable = isResponseCacheable(cachedHeadResponse);
-    const headCacheStatus = determineCacheStatus(true, headRequestCacheable, headResponseCacheable);
-    recordCacheEvent({
-      status: headCacheStatus,
-      path: url.pathname,
-      method: 'HEAD',
-      statusCode: cachedHeadResponse.status,
-      country: geoRoutingInfo?.country || null,
-      region: geoRoutingInfo?.region || null,
-      cacheLookupTime: headTiming.getCacheLookupTime(),
-      originFetchTime: null,
-      totalTime: headTiming.getTotalTime(),
-    });
-    
-    const response = buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, headTiming, true, headCacheStatus);
-    return response;
+      const cacheLookupTime = headTiming.getCacheLookupTime();
+      console.log(`Cache HIT (HEAD) for: ${url.pathname} (lookup: ${formatTiming(cacheLookupTime)}ms)`);
+      
+      headTiming.endTotal();
+      const metrics = headTiming.getMetrics();
+      console.log('Timing Metrics (HEAD):', JSON.stringify(metrics, null, 2));
+      
+      // Track cache event
+      const headResponseCacheable = isResponseCacheable(cachedHeadResponse);
+      const headCacheStatus = determineCacheStatus(true, headRequestCacheable, headResponseCacheable);
+      recordCacheEvent({
+        status: headCacheStatus,
+        path: url.pathname,
+        method: 'HEAD',
+        statusCode: cachedHeadResponse.status,
+        country: geoRoutingInfo?.country || null,
+        region: geoRoutingInfo?.region || null,
+        cacheLookupTime: headTiming.getCacheLookupTime(),
+        originFetchTime: null,
+        totalTime: headTiming.getTotalTime(),
+      });
+      
+      const response = buildCachedResponse(cachedHeadResponse, deviceInfo, imageOptParams, testInfo, formatNegotiation, resizeParams, shouldResize, url.pathname, request, geoRoutingInfo, regionContentInfo, headTiming, true, headCacheStatus);
+      return response;
+    }
+    // If stale and expired, fall through to fetch fresh content
+    console.log(`Cache HIT (EXPIRED) (HEAD) for: ${url.pathname} - fetching fresh content`);
   }
 
   const cacheLookupTime = headTiming.getCacheLookupTime();
@@ -540,11 +613,56 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
     console.log(`Fetching HEAD from geographic origin: ${headOriginUrl.href} (region: ${geoRoutingInfo.region})`);
     
     try {
-      const headOriginRequest = new Request(headOriginUrl.href, {
-        method: 'HEAD',
-        headers: request.headers,
-      });
-      headOriginResponse = await fetch(headOriginRequest);
+      // Priority 1: Try Service Binding for Worker-to-Worker communication
+      if (env.ORIGIN) {
+        console.log('[DEBUG] Using service binding for HEAD request');
+        try {
+          const headServiceRequest = new Request(headFinalUrl, {
+            method: 'HEAD',
+            headers: request.headers,
+          });
+          headOriginResponse = await env.ORIGIN.fetch(headServiceRequest);
+          console.log(`[DEBUG] HEAD service binding response status: ${headOriginResponse.status}`);
+        } catch (sbError) {
+          console.error(`[DEBUG] HEAD service binding failed: ${sbError.message}`);
+          headOriginResponse = null;
+        }
+      }
+      
+      // Priority 2: HTTP fetch (fallback if service binding not available or failed)
+      if (!headOriginResponse || (headOriginResponse.status !== 200 && headOriginResponse.status !== 304)) {
+        if (!headOriginResponse) {
+          console.log('[DEBUG] HEAD service binding returned no response, trying HTTP fetch');
+        } else {
+          console.log(`[DEBUG] HEAD service binding returned ${headOriginResponse.status}, trying HTTP fetch`);
+        }
+        const headCleanedHeaders = cleanHeadersForOrigin(request.headers, headOriginUrl.href);
+        const headFetchOptions = {
+          method: 'HEAD',
+          headers: headCleanedHeaders,
+          redirect: 'manual',
+        };
+        const httpHeadResponse = await fetch(headOriginUrl.href, headFetchOptions);
+        
+        console.log(`[DEBUG] HEAD HTTP fetch response status: ${httpHeadResponse.status}`);
+        
+        // Only use HTTP response if it's better than service binding response
+        if (!headOriginResponse || (httpHeadResponse.status === 200 && headOriginResponse.status !== 200)) {
+          headOriginResponse = httpHeadResponse;
+        }
+      }
+      
+      // Follow redirects if needed (only for HTTP fetch)
+      if (headOriginResponse && headOriginResponse.status >= 300 && headOriginResponse.status < 400) {
+        const location = headOriginResponse.headers.get('Location');
+        if (location) {
+          const headCleanedHeaders = cleanHeadersForOrigin(request.headers, headOriginUrl.href);
+          headOriginResponse = await fetch(new URL(location, headOriginUrl.origin).href, {
+            method: 'HEAD',
+            headers: headCleanedHeaders,
+          });
+        }
+      }
       headTiming.endOriginFetch();
       const originFetchTime = headTiming.getOriginFetchTime();
       console.log(`Origin HEAD response status: ${headOriginResponse.status} (fetch: ${formatTiming(originFetchTime)}ms)`);
@@ -575,13 +693,23 @@ export async function handleHEAD(request, url, imageUrl, deviceInfo, imageOptPar
 
   let headResponseStatus = 200;
   if (headOriginResponse) {
+    // Use the origin response status
     headResponseStatus = headOriginResponse.status;
+    console.log(`[DEBUG] HEAD origin response status: ${headResponseStatus}`);
+    
     // Copy relevant headers from origin response
     headOriginResponse.headers.forEach((value, key) => {
-      if (key.toLowerCase() !== 'content-length' && key.toLowerCase() !== 'transfer-encoding') {
+      const lowerKey = key.toLowerCase();
+      // Skip headers that shouldn't be copied for HEAD requests
+      if (lowerKey !== 'content-length' && 
+          lowerKey !== 'transfer-encoding' &&
+          lowerKey !== 'content-encoding') {
         headResponseHeaders.set(key, value);
       }
     });
+  } else {
+    console.log('[DEBUG] No HEAD origin response available');
+    headResponseStatus = 503;
   }
 
   let headResponse = new Response(null, {

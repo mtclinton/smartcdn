@@ -52,7 +52,6 @@ name = "smartcdn-staging"
 [env.staging.vars]
 ENVIRONMENT = "staging"
 # Geographic Routing Origins
-# Replace these with your origin server URLs
 GEO_ORIGIN_NA = "https://your-origin-na.example.com"
 GEO_ORIGIN_EU = "https://your-origin-eu.example.com"
 GEO_ORIGIN_ASIA = "https://your-origin-asia.example.com"
@@ -84,10 +83,10 @@ name = "smartcdn"
 [env.production.vars]
 ENVIRONMENT = "production"
 # Geographic Routing Origins
-GEO_ORIGIN_NA = "https://us-origin.example.com"
-GEO_ORIGIN_EU = "https://eu-origin.example.com"
-GEO_ORIGIN_ASIA = "https://asia-origin.example.com"
-GEO_ORIGIN_DEFAULT = "https://global-origin.example.com"
+GEO_ORIGIN_NA = "https://your-origin-na.example.com"
+GEO_ORIGIN_EU = "https://your-origin-eu.example.com"
+GEO_ORIGIN_ASIA = "https://your-origin-asia.example.com"
+GEO_ORIGIN_DEFAULT = "https://your-origin.example.com"
 # Cache TTLs (in seconds)
 CACHE_TTL_IMAGES = "2592000"  # 30 days
 CACHE_TTL_CSS_JS = "604800"   # 7 days

@@ -3,6 +3,21 @@
   "version": "1.0.0",
   "description": "Cloudflare Workers CDN with A/B Testing and Image Optimization",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/smartcdn.git"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "cdn",
+    "ab-testing",
+    "image-optimization",
+    "edge-computing",
+    "caching"
+  ],
+  "author": "SmartCDN Contributors",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -12,9 +27,12 @@
     "test:coverage": "vitest --coverage",
     "test:unit": "vitest --exclude test/integration.test.js",
     "test:integration": "vitest test/integration.test.js --no-coverage",
-    "deploy:staging": "node scripts/deploy.js staging",
-    "deploy:production": "node scripts/deploy.js production",
-    "deploy": "node scripts/deploy.js",
+    "build": "node build.js",
+    "build:prod": "NODE_ENV=production node build.js",
+    "predeploy": "npm run build",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "deploy": "npm run deploy:staging",
     "rollback:staging": "node scripts/rollback.js staging",
     "rollback:production": "node scripts/rollback.js production",
     "rollback": "node scripts/rollback.js",
@@ -24,8 +42,13 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260101.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@vitest/coverage-v8": "^4.0.16",
+    "esbuild": "^0.27.2",
+    "parcel": "^2.16.3",
+    "rollup": "^4.54.0",
+    "rollup-plugin-esbuild": "^6.2.1",
     "vitest": "^4.0.16",
-    "@vitest/coverage-v8": "^4.0.16"
+    "wrangler": "^4.54.0"
   }
 }
-

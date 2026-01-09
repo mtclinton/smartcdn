@@ -382,3 +382,4 @@ export function shouldResizeImage(url, deviceInfo, imageOptParams) {
   return hasWidth || hasHeight || hasQuality || deviceInfo.isMobile;
 }
 
+

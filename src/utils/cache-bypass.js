@@ -235,3 +235,4 @@ export function getBypassReason(bypassInfo) {
   return `${bypassInfo.description} (${bypassInfo.matchedRule})`;
 }
 
+

@@ -119,35 +119,60 @@ async function runTests() {
 
 function buildWorker() {
   logStep('2/5', 'Building worker...');
-  // Cloudflare Workers don't require a build step for JavaScript
-  // but we can validate the code
-  logSuccess('Worker code validated (no build step required for JS)');
+  const result = exec('npm run build');
+  if (!result.success) {
+    logError('Build failed. Aborting deployment.');
+    process.exit(1);
+  }
+  logSuccess('Worker built successfully');
 }
 
 async function deployToCloudflare(env) {
   logStep('3/5', `Deploying to ${env}...`);
-  
+
   const deploymentInfo = getDeploymentInfo(env);
   log(`Deploying worker: ${deploymentInfo.workerName}`, 'blue');
-  
-  // Get current deployment ID before deploying
-  const currentDeploymentId = await getCurrentDeploymentId(env, deploymentInfo.workerName);
-  
+
+  // Try to get current deployment ID before deploying (may not exist for first deployment)
+  let currentDeploymentId = null;
+  try {
+    currentDeploymentId = await getCurrentDeploymentId(env, deploymentInfo.workerName);
+  } catch (error) {
+    log(`First deployment detected for ${deploymentInfo.workerName}`, 'yellow');
+  }
+
+  // Attempt automated deployment
   const result = exec(`npx wrangler deploy --env ${env}`, {
     stdio: 'inherit',
   });
-  
+
   if (!result.success) {
-    logError(`Deployment to ${env} failed`);
+    // Check for specific error types
+    const errorOutput = result.error ? String(result.error) : '';
+
+    if (errorOutput.includes('This Worker does not exist')) {
+      logWarning('Worker does not exist. This is normal for first-time deployments.');
+      log('Please create the worker manually in Cloudflare Dashboard or run:');
+      log(`  wrangler deploy --env ${env} --name ${deploymentInfo.workerName}`);
+      log('');
+    }
+
+    logError(`Deployment failed. Check the error messages above.`);
     return { success: false, previousDeploymentId: currentDeploymentId };
   }
-  
+
   // Get new deployment ID
-  const newDeploymentId = await getCurrentDeploymentId(env, deploymentInfo.workerName);
-  
+  let newDeploymentId = null;
+  try {
+    newDeploymentId = await getCurrentDeploymentId(env, deploymentInfo.workerName);
+  } catch (error) {
+    // If we can't get deployment ID, use timestamp
+    newDeploymentId = `deployment-${Date.now()}`;
+  }
+
   // Save deployment info for rollback
   saveDeploymentInfo(env, newDeploymentId);
-  
+
   logSuccess(`Deployed to ${env} successfully`);
   return { success: true, deploymentId: newDeploymentId, previousDeploymentId: currentDeploymentId };
 }

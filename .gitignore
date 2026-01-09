@@ -1,28 +1,19 @@
 # Dependencies
 node_modules/
 package-lock.json
+yarn.lock
 
-# Deployment info
+# Build output
+dist/
+.wrangler/
+.dev.vars
 .deployment-info.json
+.parcel-cache/
 
-# Test coverage
-coverage/
-.nyc_output/
-
-# Environment variables
+# Environment files
 .env
 .env.local
 .env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# OS files
-.DS_Store
-Thumbs.db
 
 # IDE
 .vscode/
@@ -31,7 +22,24 @@ Thumbs.db
 *.swo
 *~
 
-# Wrangler
-.wrangler/
-.dev.vars
+# OS
+.DS_Store
+Thumbs.db
 
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Cloudflare
+wrangler.toml
+.dev.vars

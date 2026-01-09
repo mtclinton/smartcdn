@@ -162,3 +162,4 @@ export function getImageOptimizationParams(deviceInfo) {
   return params;
 }
 
+

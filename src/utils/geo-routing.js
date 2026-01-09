@@ -223,7 +223,23 @@ export async function getGeoRoutingInfo(request, env = {}, featureFlagEnabled = 
  * @returns {URL} Full URL pointing to the origin server
  */
 export function buildOriginUrl(originalUrl, originUrl) {
-  // Preserve pathname and search params
-  return new URL(originalUrl.pathname + originalUrl.search, originUrl);
+  // Ensure originUrl doesn't end with a slash
+  const cleanOriginUrl = originUrl.endsWith('/') ? originUrl.slice(0, -1) : originUrl;
+  
+  // Build path - ensure pathname starts with / but handle empty pathname
+  let path = originalUrl.pathname || '/';
+  if (!path.startsWith('/')) {
+    path = '/' + path;
+  }
+  
+  // Add search params if they exist
+  const search = originalUrl.search || '';
+  const fullPath = path + search;
+  
+  // Construct URL - using string concatenation is more reliable for Worker-to-Worker
+  const fullUrl = cleanOriginUrl + fullPath;
+  
+  // Return as URL object for compatibility
+  return new URL(fullUrl);
 }
 

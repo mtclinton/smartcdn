@@ -38,6 +38,7 @@ import {
   handlePATCH,
   handleOPTIONS,
 } from './handlers/index.js';
+import { handleAnalytics } from './handlers/analytics.js';
 
 /**
  * Main Worker Export
@@ -58,6 +59,11 @@ export default {
       const url = new URL(request.url);
       const method = request.method;
       const headers = Object.fromEntries(request.headers.entries());
+      
+      // Handle analytics endpoints (before other routing)
+      if (url.pathname.startsWith('/__analytics')) {
+        return await handleAnalytics(request, url);
+      }
 
       // Feature flags: Check if features are enabled
       const abTestingEnabled = await isABTestingEnabled(env);
